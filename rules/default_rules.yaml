@@ -1,0 +1,140 @@
+rules:
+  - name: AADHAAR
+    pattern: '(?<!\d)(?<!\d\s)(?<!\d-)\b\d{4}[-\s]?\d{4}[-\s]?\d{4}\b(?![-\s]?\d)'
+    category: PII
+    base_weight: 3.0
+    regulation_tags: ["DPDP Act 2023", "GDPR Art.6"]
+    description: "Indian Aadhaar Unique Identification Number"
+
+  - name: PAN
+    pattern: '\b[A-Z]{5}[0-9]{4}[A-Z]\b'
+    category: PII
+    base_weight: 3.0
+    regulation_tags: ["Income Tax Act India", "GDPR Art.6"]
+    description: "Indian Permanent Account Number (PAN)"
+
+  - name: SSN
+    pattern: '\b\d{3}-\d{2}-\d{4}\b'
+    category: PII
+    base_weight: 3.0
+    regulation_tags: ["HIPAA §164.514", "GDPR Art.6"]
+    description: "US Social Security Number"
+
+  - name: PASSPORT
+    pattern: '\b[A-PR-WY][1-9]\d{7}\b'
+    category: PII
+    base_weight: 3.5
+    regulation_tags: ["GDPR Art.9", "DPDP Act 2023"]
+    description: "Indian Passport Number"
+
+  - name: VOTER_ID
+    pattern: '\b[A-Z]{3}[0-9]{7}\b'
+    category: PII
+    base_weight: 2.5
+    regulation_tags: ["DPDP Act 2023"]
+    description: "Indian Voter ID Card Number"
+
+  - name: EMAIL
+    pattern: '\b[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}\b'
+    category: PII
+    base_weight: 1.0
+    regulation_tags: ["GDPR Art.6"]
+    description: "Standard Email Address"
+
+  - name: PHONE_IN
+    pattern: '\b(?:\+91|0)?[6-9]\d{9}\b'
+    category: PII
+    base_weight: 1.5
+    regulation_tags: ["DPDP Act 2023"]
+    description: "Indian Mobile Phone Number"
+
+  - name: PHONE_US
+    pattern: '\b(?:\+1\s?)?\(?\d{3}\)?[\s.\-]\d{3}[\s.\-]\d{4}\b'
+    category: PII
+    base_weight: 1.5
+    regulation_tags: ["HIPAA §164.514"]
+    description: "US Phone Number"
+
+  - name: CREDIT_CARD
+    pattern: '\b(?:4(?:[0-9][-\s]?){12}(?:(?:[0-9][-\s]?){3})?|5[1-5](?:[0-9][-\s]?){14}|3[47](?:[0-9][-\s]?){13}|3(?:0[0-5]|[68][0-9])(?:[0-9][-\s]?){11}|6(?:011|5[0-9]{2})(?:[0-9][-\s]?){12})\b'
+    category: FINANCIAL
+    base_weight: 4.0
+    regulation_tags: ["PCI-DSS Req.3.4"]
+    description: "Credit Card Number (Luhn-checked)"
+
+  - name: UPI
+    pattern: '\b[a-zA-Z0-9.\-_]{2,256}@[a-zA-Z]{2,64}\b'
+    category: FINANCIAL
+    base_weight: 2.0
+    regulation_tags: ["RBI Guidelines India"]
+    description: "Unified Payments Interface (UPI) ID"
+
+  - name: IFSC
+    pattern: '\b[A-Z]{4}0[A-Z0-9]{6}\b'
+    category: FINANCIAL
+    base_weight: 2.0
+    regulation_tags: ["RBI Guidelines India"]
+    description: "Indian Financial System Code (IFSC)"
+
+  - name: IBAN
+    pattern: '\b[A-Z]{2}\d{2}[A-Z0-9]{4}\d{7}(?:[A-Z0-9]?){0,16}\b'
+    category: FINANCIAL
+    base_weight: 3.0
+    regulation_tags: ["PCI-DSS Req.3.4", "GDPR Art.6"]
+    description: "International Bank Account Number (IBAN)"
+
+  - name: API_KEY_GENERIC
+    pattern: '(?i)(?:api[_\-]?key|api[_\-]?secret|access[_\-]?key)\s*[=:]\s*["'']?([A-Za-z0-9_\-]{16,64})'
+    category: SECRETS
+    base_weight: 5.0
+    regulation_tags: ["OWASP A02:2021"]
+    description: "Generic API Key or Secret Parameter"
+
+  - name: AWS_KEY
+    pattern: '\bAKIA[0-9A-Z]{16}\b'
+    category: SECRETS
+    base_weight: 5.0
+    regulation_tags: ["OWASP A02:2021", "CIS AWS Benchmark"]
+    description: "AWS Access Key ID"
+
+  - name: BEARER_TOKEN
+    pattern: '(?i)bearer\s+([A-Za-z0-9\-_\.]{20,})'
+    category: SECRETS
+    base_weight: 4.5
+    regulation_tags: ["OWASP A02:2021"]
+    description: "Bearer Authorization Token"
+
+  - name: PRIVATE_KEY
+    pattern: '-----BEGIN (?:RSA |EC )?PRIVATE KEY-----'
+    category: SECRETS
+    base_weight: 5.0
+    regulation_tags: ["OWASP A02:2021"]
+    description: "PEM Private Key block"
+
+  - name: PASSWORD_FIELD
+    pattern: '(?i)(?:password|passwd|pwd)\s*[=:]\s*["'']?(\S{6,})'
+    category: SECRETS
+    base_weight: 4.0
+    regulation_tags: ["OWASP A02:2021"]
+    description: "Plain-text Password assignment"
+
+  - name: ICD10_CODE
+    pattern: '\b[A-TV-Z][0-9][0-9A-Z]\.?[0-9A-Z]{0,4}\b'
+    category: HEALTH
+    base_weight: 4.0
+    regulation_tags: ["HIPAA §164.312", "GDPR Art.9"]
+    description: "ICD-10 Medical Diagnosis Code"
+
+  - name: PHI_KEYWORDS
+    pattern: '(?i)\b(?:diagnosis|prescription|medical\s+record|blood\s+type|HIV|diabetes|patient\s+id|insurance\s+number)\b'
+    category: HEALTH
+    base_weight: 3.5
+    regulation_tags: ["HIPAA §164.312", "GDPR Art.9"]
+    description: "Protected Health Information (PHI) Keywords"
+
+  - name: BIOMETRIC_KEYWORDS
+    pattern: '(?i)\b(?:fingerprint|retina\s+scan|facial\s+recognition|iris\s+scan|biometric)\b'
+    category: HEALTH
+    base_weight: 4.0
+    regulation_tags: ["GDPR Art.9(1)(a)"]
+    description: "Biometric Data Keywords"

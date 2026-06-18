@@ -1,0 +1,6 @@
+ProductID,Name,Category,Price,Quantity
+101,Standard Widget,Hardware,19.99,150
+102,Premium Widget,Hardware,29.99,85
+103,Super Widget,Hardware,49.99,40
+104,Widget Case,Accessory,9.99,300
+105,Widget Cable,Accessory,5.49,500

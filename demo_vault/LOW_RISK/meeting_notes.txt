@@ -1,0 +1,14 @@
+Weekly Sync Meeting Notes
+Date: June 15, 2026
+
+Attendees: John, Sarah, Dave
+
+Discussion:
+1. Reviewed Q2 product roadmap and verified timelines for release.
+2. Dave showed the new UI design mockups; the team approved the dark mode version.
+3. Sarah gave an update on marketing strategies for the upcoming launch.
+
+Action Items:
+- Dave to finalize UI assets.
+- Sarah to coordinate social media posts.
+- John to schedule next sync for Monday morning.

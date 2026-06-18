@@ -1,0 +1,11 @@
+{
+    "original_path": "C:\\Users\\HP\\.gemini\\antigravity\\scratch\\datashield\\demo_vault\\MEDIUM_RISK\\contacts_export.csv",
+    "quarantine_timestamp": "2026-06-16T13:51:38.791868Z",
+    "triggered_patterns": [
+        "UPI",
+        "UPI",
+        "UPI",
+        "UPI",
+        "UPI"
+    ]
+}

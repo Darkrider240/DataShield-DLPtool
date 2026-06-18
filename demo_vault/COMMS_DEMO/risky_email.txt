@@ -1,0 +1,4 @@
+Subject: Employee records — Q3
+Body: Hi team, please find attached the updated employee list.
+Aadhaar: 1234 5678 9012, PAN: ABCDE1234F, DOB: 12/03/1990
+Bank IFSC: HDFC0001234

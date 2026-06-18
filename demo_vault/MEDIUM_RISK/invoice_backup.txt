@@ -1,0 +1,13 @@
+INVOICE #INV-2026-004
+Date: 2026-06-01
+Client: Acme Corp
+Total Due: $1,420.00
+
+Payment Details:
+Please settle this invoice using the card on file:
+Card Number: 4111-1111-1111-1111
+Expiration: 12/28
+CVV: ***
+
+If you have any questions, please contact billing@acme-corp.com.
+Thank you for your business!
