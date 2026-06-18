@@ -200,7 +200,7 @@ class CommsTab(ttk.Frame):
         events = self.state["comms_events"]
         total = len(events)
         
-        emails_blocked = sum(1 for e in events if e["channel"] == "EMAIL" and e["action"] in ["BLOCK", "BLOCKED"])
+        emails_blocked = sum(1 for e in events if e["channel"] in ["EMAIL", "WEBMAIL"] and e["action"] in ["BLOCK", "BLOCKED"])
         clipboard_clears = sum(1 for e in events if e["channel"] == "CLIPBOARD")
         usb_scans = sum(1 for e in events if e["channel"] == "USB" and "mounted" in e["detail"])
 
