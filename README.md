@@ -2,6 +2,74 @@
 
 DataShield v2 is a fully functional, enterprise-grade academic prototype of a Data Loss Prevention (DLP) desktop application. It scans local files and folders for sensitive data patterns (such as PII, financial data, access keys, and medical codes), classifies their threat level, performs Shannon entropy analysis to detect high-entropy secrets, and checks for disguised file type extensions. It generates detailed HTML reports with optional Gemini-powered AI remediation explanations, all while maintaining a tamper-evident, SHA-256 chained audit ledger.
 
+## System Architecture
+
+The following diagram illustrates how user interface actions, endpoint monitoring interfaces, core scanner modules, and enforcement handlers interact:
+
+```mermaid
+graph TD
+    %% Styling definitions
+    classDef ui fill:#eef2f7,stroke:#3b82f6,stroke-width:2px,color:#1e293b;
+    classDef source fill:#f0fdf4,stroke:#22c55e,stroke-width:2px,color:#14532d;
+    classDef core fill:#fff7ed,stroke:#f97316,stroke-width:2px,color:#7c2d12;
+    classDef action fill:#faf5ff,stroke:#a855f7,stroke-width:2px,color:#581c87;
+
+    subgraph UI ["User & Web Interfaces"]
+        GUI["Desktop GUI (Tkinter)"]:::ui
+        CLI["CLI Command Line"]:::ui
+        WebmailExt["Webmail Browser Extension"]:::ui
+    end
+
+    subgraph Interceptors ["Data Sources & Interceptors"]
+        FileWatcher["File System Watcher"]:::source
+        ClipboardMon["Clipboard Monitor"]:::source
+        USBMon["USB Drive Monitor"]:::source
+        SMTPProxy["SMTP Proxy Server (Port 1025)"]:::source
+        HTTPAPI["Local Webmail Scan API (Port 5000)"]:::source
+    end
+
+    subgraph Core ["Core Analysis Engine"]
+        PolicyEng["Policy Engine"]:::core
+        ScannerEng["Scanner Engine"]:::core
+        BehaviorEng["Behavior Engine"]:::core
+        ClassifierEng["Classifier Engine"]:::core
+    end
+
+    subgraph Enforcement ["Action & Enforcement"]
+        Quarantine["Quarantine Manager"]:::action
+        Alerts["Alerts & Dispatcher"]:::action
+        AuditLog["Audit Logger"]:::action
+        AIExplain["AI Explainer (Gemini API)"]:::action
+        Reports["Report Generator"]:::action
+    end
+
+    %% Flows
+    GUI --> PolicyEng
+    CLI --> PolicyEng
+    WebmailExt -->|HTTP POST| HTTPAPI
+    
+    FileWatcher --> PolicyEng
+    ClipboardMon --> PolicyEng
+    USBMon --> PolicyEng
+    SMTPProxy --> PolicyEng
+    HTTPAPI --> PolicyEng
+
+    PolicyEng --> ScannerEng
+    ScannerEng --> BehaviorEng
+    BehaviorEng --> ClassifierEng
+
+    ClassifierEng --> AuditLog
+    ClassifierEng --> Quarantine
+    ClassifierEng --> Alerts
+    ClassifierEng --> AIExplain
+    ClassifierEng --> Reports
+
+    style UI fill:#f8fafc,stroke:#cbd5e1,stroke-width:1px;
+    style Interceptors fill:#f8fafc,stroke:#cbd5e1,stroke-width:1px;
+    style Core fill:#f8fafc,stroke:#cbd5e1,stroke-width:1px;
+    style Enforcement fill:#f8fafc,stroke:#cbd5e1,stroke-width:1px;
+```
+
 ## Features & Comparison
 
 ### Comparison Table
