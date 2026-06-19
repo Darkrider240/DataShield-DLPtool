@@ -4,70 +4,187 @@ DataShield v2 is a fully functional, enterprise-grade academic prototype of a Da
 
 ## System Architecture
 
-The following diagram illustrates how user interface actions, endpoint monitoring interfaces, core scanner modules, and enforcement handlers interact:
+### Enterprise Architecture (v2.0 — `enterp` branch)
+
+DataShield Enterprise is a multi-tier system. Endpoint agents on user machines forward DLP events to a central FastAPI server, which stores and analyses them. A React dashboard provides real-time visibility.
+
+```mermaid
+graph TB
+    classDef agent   fill:#0f172a,stroke:#6366f1,color:#e2e8f0,stroke-width:2px
+    classDef server  fill:#0f172a,stroke:#f97316,color:#e2e8f0,stroke-width:2px
+    classDef db      fill:#0f172a,stroke:#22c55e,color:#e2e8f0,stroke-width:2px
+    classDef dash    fill:#0f172a,stroke:#8b5cf6,color:#e2e8f0,stroke-width:2px
+    classDef ext     fill:#0f172a,stroke:#f59e0b,color:#e2e8f0,stroke-width:2px
+    classDef ai      fill:#0f172a,stroke:#ec4899,color:#e2e8f0,stroke-width:2px
+
+    subgraph ENDPOINT ["🖥️  Endpoint Agent  (User Machine)"]
+        direction TB
+        GUI["Desktop GUI\nTkinter"]:::agent
+        subgraph INTERCEPTORS ["Interceptors"]
+            direction LR
+            FILE["File\nWatcher"]:::agent
+            CLIP["Clipboard\nMonitor"]:::agent
+            USB["USB\nMonitor"]:::agent
+            SMTP["SMTP\nProxy :1025"]:::agent
+            WMAPI["Webmail\nAPI :5000"]:::agent
+        end
+        subgraph ENGINE ["Core Engine"]
+            direction LR
+            POLICY["Policy\nEngine"]:::agent
+            SCAN["Scanner\nEngine"]:::agent
+            BEHAV["Behaviour\nEngine"]:::agent
+            CLASS["Classifier\nEngine"]:::agent
+        end
+        AUDIT["SHA-256 Chained\nAudit Log"]:::agent
+        RC["Reporting\nClient"]:::agent
+    end
+
+    subgraph BROWSER ["🌐  Browser Extension"]
+        EXT["Chrome / Edge\nWebmail Extension"]:::ext
+    end
+
+    subgraph CENTRAL ["⚙️  Central Server  (FastAPI + Uvicorn)"]
+        direction TB
+        subgraph APIS ["REST API Routes"]
+            direction LR
+            AUTH["/api/auth\nJWT Login"]:::server
+            AGAPI["/api/agents\nRegister · Heartbeat\nEvent Ingest"]:::server
+            EMPAPI["/api/employees\nCRUD · Flag"]:::server
+            EVAPI["/api/events\nFiltered Log"]:::server
+            POLAPI["/api/policies\nYAML Import · Push"]:::server
+            ALTAPI["/api/alerts\nAck · Resolve"]:::server
+            REPAPI["/api/reports\nMetrics · AI Summary"]:::server
+            ENCAPI["/api/encryption\nKey Status · Rotate"]:::server
+        end
+        WS["/ws/events\nWebSocket Live Feed"]:::server
+        subgraph SERVICES ["Services"]
+            direction LR
+            CRYPTO["Envelope\nEncryption\nPBKDF2 → DEK\nAES-256-GCM"]:::server
+            ALERTENG["Alert\nEngine\n4h dedup\nSMTP dispatch"]:::server
+            BEHAVSVC["Behaviour\nService\nRisk score\n15min anomaly"]:::server
+            POLPUSH["Policy\nPusher"]:::server
+        end
+    end
+
+    subgraph STORAGE ["🗄️  PostgreSQL Database"]
+        direction LR
+        TBL1["employees\n+ encrypted_dek"]:::db
+        TBL2["dlp_events\n+ encrypted fields"]:::db
+        TBL3["alerts"]:::db
+        TBL4["agents\npolicies"]:::db
+    end
+
+    subgraph DASHBOARD ["📊  React Dashboard  (Vite + nginx)"]
+        direction TB
+        subgraph PAGES ["Pages"]
+            direction LR
+            PG1["Dashboard\nMetrics · Charts"]:::dash
+            PG2["Employees\nHeatmap · Flag"]:::dash
+            PG3["Events\nFiltered Log"]:::dash
+            PG4["Policies\nYAML Editor"]:::dash
+            PG5["Alerts\nAck · Resolve"]:::dash
+            PG6["Encryption\nKey Rotation"]:::dash
+            PG7["Reports\nAI Summary"]:::dash
+        end
+        LIVEFEED["⚡ Live Feed\nWebSocket"]:::dash
+    end
+
+    GEMINI["✨ Gemini AI API\nExecutive Summary"]:::ai
+
+    %% Endpoint flows
+    FILE & CLIP & USB & SMTP & WMAPI --> POLICY
+    POLICY --> SCAN --> BEHAV --> CLASS
+    CLASS --> AUDIT
+    CLASS --> RC
+    GUI --> POLICY
+    EXT -->|"HTTP POST\n:5000"| WMAPI
+
+    %% Agent → Server
+    RC -->|"POST /api/agents/events\nX-DataShield-Agent-Key"| AGAPI
+
+    %% Server internal
+    AGAPI --> CRYPTO
+    AGAPI --> ALERTENG
+    AGAPI --> BEHAVSVC
+    POLAPI --> POLPUSH
+    REPAPI --> GEMINI
+    CRYPTO <-->|"AES-256-GCM\nDEK per employee"| TBL2
+    ALERTENG --> WS
+
+    %% Server → DB
+    AGAPI & EMPAPI & EVAPI & POLAPI & ALTAPI & REPAPI & ENCAPI <--> TBL1 & TBL2 & TBL3 & TBL4
+
+    %% Dashboard → Server
+    PAGES -->|"Bearer JWT\nREST calls"| APIS
+    LIVEFEED -->|"ws://\nJWT token"| WS
+
+    style ENDPOINT   fill:#0b0f1a,stroke:#6366f1,stroke-width:2px,color:#e2e8f0
+    style BROWSER    fill:#0b0f1a,stroke:#f59e0b,stroke-width:2px,color:#e2e8f0
+    style CENTRAL    fill:#0b0f1a,stroke:#f97316,stroke-width:2px,color:#e2e8f0
+    style STORAGE    fill:#0b0f1a,stroke:#22c55e,stroke-width:2px,color:#e2e8f0
+    style DASHBOARD  fill:#0b0f1a,stroke:#8b5cf6,stroke-width:2px,color:#e2e8f0
+    style INTERCEPTORS fill:#111827,stroke:#6366f1,stroke-dasharray:4
+    style ENGINE       fill:#111827,stroke:#f97316,stroke-dasharray:4
+    style APIS         fill:#111827,stroke:#f97316,stroke-dasharray:4
+    style SERVICES     fill:#111827,stroke:#f97316,stroke-dasharray:4
+    style PAGES        fill:#111827,stroke:#8b5cf6,stroke-dasharray:4
+```
+
+### v1 Standalone Architecture
+
+The original standalone DLP agent (still fully functional on `main`):
 
 ```mermaid
 graph TD
-    %% Styling definitions
     classDef ui fill:#eef2f7,stroke:#3b82f6,stroke-width:2px,color:#1e293b;
     classDef source fill:#f0fdf4,stroke:#22c55e,stroke-width:2px,color:#14532d;
     classDef core fill:#fff7ed,stroke:#f97316,stroke-width:2px,color:#7c2d12;
     classDef action fill:#faf5ff,stroke:#a855f7,stroke-width:2px,color:#581c87;
 
     subgraph UI ["User & Web Interfaces"]
-        GUI["Desktop GUI (Tkinter)"]:::ui
-        CLI["CLI Command Line"]:::ui
-        WebmailExt["Webmail Browser Extension"]:::ui
+        GUI2["Desktop GUI (Tkinter)"]:::ui
+        CLI2["CLI Command Line"]:::ui
+        WebmailExt2["Webmail Browser Extension"]:::ui
     end
 
     subgraph Interceptors ["Data Sources & Interceptors"]
-        FileWatcher["File System Watcher"]:::source
-        ClipboardMon["Clipboard Monitor"]:::source
-        USBMon["USB Drive Monitor"]:::source
-        SMTPProxy["SMTP Proxy Server (Port 1025)"]:::source
-        HTTPAPI["Local Webmail Scan API (Port 5000)"]:::source
+        FileWatcher2["File System Watcher"]:::source
+        ClipboardMon2["Clipboard Monitor"]:::source
+        USBMon2["USB Drive Monitor"]:::source
+        SMTPProxy2["SMTP Proxy Server (Port 1025)"]:::source
+        HTTPAPI2["Local Webmail Scan API (Port 5000)"]:::source
     end
 
     subgraph Core ["Core Analysis Engine"]
-        PolicyEng["Policy Engine"]:::core
-        ScannerEng["Scanner Engine"]:::core
-        BehaviorEng["Behavior Engine"]:::core
-        ClassifierEng["Classifier Engine"]:::core
+        PolicyEng2["Policy Engine"]:::core
+        ScannerEng2["Scanner Engine"]:::core
+        BehaviorEng2["Behavior Engine"]:::core
+        ClassifierEng2["Classifier Engine"]:::core
     end
 
     subgraph Enforcement ["Action & Enforcement"]
-        Quarantine["Quarantine Manager"]:::action
-        Alerts["Alerts & Dispatcher"]:::action
-        AuditLog["Audit Logger"]:::action
-        AIExplain["AI Explainer (Gemini API)"]:::action
-        Reports["Report Generator"]:::action
+        Quarantine2["Quarantine Manager"]:::action
+        Alerts2["Alerts & Dispatcher"]:::action
+        AuditLog2["Audit Logger"]:::action
+        AIExplain2["AI Explainer (Gemini API)"]:::action
+        Reports2["Report Generator"]:::action
     end
 
-    %% Flows
-    GUI --> PolicyEng
-    CLI --> PolicyEng
-    WebmailExt -->|HTTP POST| HTTPAPI
-    
-    FileWatcher --> PolicyEng
-    ClipboardMon --> PolicyEng
-    USBMon --> PolicyEng
-    SMTPProxy --> PolicyEng
-    HTTPAPI --> PolicyEng
+    GUI2 --> PolicyEng2
+    CLI2 --> PolicyEng2
+    WebmailExt2 -->|HTTP POST| HTTPAPI2
+    FileWatcher2 --> PolicyEng2
+    ClipboardMon2 --> PolicyEng2
+    USBMon2 --> PolicyEng2
+    SMTPProxy2 --> PolicyEng2
+    HTTPAPI2 --> PolicyEng2
+    PolicyEng2 --> ScannerEng2 --> BehaviorEng2 --> ClassifierEng2
+    ClassifierEng2 --> AuditLog2 & Quarantine2 & Alerts2 & AIExplain2 & Reports2
 
-    PolicyEng --> ScannerEng
-    ScannerEng --> BehaviorEng
-    BehaviorEng --> ClassifierEng
-
-    ClassifierEng --> AuditLog
-    ClassifierEng --> Quarantine
-    ClassifierEng --> Alerts
-    ClassifierEng --> AIExplain
-    ClassifierEng --> Reports
-
-    style UI fill:#f8fafc,stroke:#cbd5e1,stroke-width:1px;
-    style Interceptors fill:#f8fafc,stroke:#cbd5e1,stroke-width:1px;
-    style Core fill:#f8fafc,stroke:#cbd5e1,stroke-width:1px;
-    style Enforcement fill:#f8fafc,stroke:#cbd5e1,stroke-width:1px;
+    style UI fill:#f8fafc,stroke:#cbd5e1
+    style Interceptors fill:#f8fafc,stroke:#cbd5e1
+    style Core fill:#f8fafc,stroke:#cbd5e1
+    style Enforcement fill:#f8fafc,stroke:#cbd5e1
 ```
 
 ## Features & Comparison
