@@ -174,6 +174,29 @@ class CommsTab(ttk.Frame):
         }
         self.state["comms_events"].append(event_dict)
 
+        # Reroute log to central server if client exists
+        client = self.state.get("reporting_client")
+        if client:
+            if decision:
+                classification_result = {
+                    "risk_level": decision.risk_level,
+                    "risk_score": decision.risk_score,
+                    "file_path": decision.classification.get("file_path", "") if (hasattr(decision, "classification") and isinstance(decision.classification, dict)) else "",
+                    "top_matches": decision.classification.get("top_matches", []) if (hasattr(decision, "classification") and isinstance(decision.classification, dict)) else [],
+                    "regulation_hits": decision.regulation_tags,
+                    "ai_explanation": decision.ai_explanation
+                }
+            else:
+                classification_result = {
+                    "risk_level": "MEDIUM" if action == "WARN" else ("HIGH" if action == "BLOCK" else "CLEAN"),
+                    "risk_score": 4.0 if action == "WARN" else (10.0 if action == "BLOCK" else 0.0),
+                    "file_path": detail,
+                    "top_matches": [],
+                    "regulation_hits": [],
+                    "ai_explanation": ""
+                }
+            client.enqueue_event(classification_result, channel, action)
+
         # Renders the line in the GUI Text Feed
         def render():
             self.log_text.configure(state="normal")

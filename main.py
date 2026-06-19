@@ -20,7 +20,7 @@ import audit
 from audit import AuditLogger
 from policy import PolicyManager
 
-def run_cli_scan(target_dir: str, output_dir: str, enable_quarantine: bool):
+def run_cli_scan(target_dir: str, output_dir: str, enable_quarantine: bool, client=None):
     """
     Executes a headless, recursive DLP assessment scan on target_dir
     and generates reports in output_dir.
@@ -121,6 +121,8 @@ def run_cli_scan(target_dir: str, output_dir: str, enable_quarantine: bool):
                 )
                 
             file_results.append(file_report)
+            if client:
+                client.enqueue_event(file_report, "FILE", "BLOCK" if file_report["risk_level"] == "HIGH" and enable_quarantine else "ALLOW")
             
             # Log individual file scan to ledger
             audit_logger.log("FILE_SCANNED", {
@@ -180,6 +182,18 @@ def main():
     
     args = parser.parse_args()
     
+    from dotenv import load_dotenv
+    load_dotenv()
+    server_url = os.environ.get("SERVER_URL")
+    agent_api_key = os.environ.get("AGENT_API_KEY")
+    
+    client = None
+    if server_url and agent_api_key:
+        from agent.reporting_client import ServerReportingClient
+        print(f"[*] Connecting to DataShield Enterprise central server at {server_url}...")
+        client = ServerReportingClient(server_url, agent_api_key)
+        client.start()
+    
     if args.cli:
         # HEADLESS CLI SCAN
         print("=====================================================================")
@@ -189,7 +203,7 @@ def main():
         print("            DataShield v2 — Data Loss Prevention Engine            ")
         print("=====================================================================")
         
-        file_results, audit_logger = run_cli_scan(args.path, args.output, args.auto_quarantine)
+        file_results, audit_logger = run_cli_scan(args.path, args.output, args.auto_quarantine, client=client)
         
         comms_active = args.smtp_proxy or args.clipboard or args.usb
         proxy_obj = None
@@ -198,6 +212,26 @@ def main():
         
         def cli_comms_callback(channel, action, detail, decision=None, **kwargs):
             print(f"[{time.strftime('%H:%M:%S')}] [{channel}] {action} — {detail}")
+            if client:
+                if decision:
+                    classification_result = {
+                        "risk_level": decision.risk_level,
+                        "risk_score": decision.risk_score,
+                        "file_path": decision.classification.get("file_path", "") if (hasattr(decision, "classification") and isinstance(decision.classification, dict)) else "",
+                        "top_matches": decision.classification.get("top_matches", []) if (hasattr(decision, "classification") and isinstance(decision.classification, dict)) else [],
+                        "regulation_hits": decision.regulation_tags,
+                        "ai_explanation": decision.ai_explanation
+                    }
+                else:
+                    classification_result = {
+                        "risk_level": "MEDIUM" if action == "WARN" else ("HIGH" if action == "BLOCK" else "CLEAN"),
+                        "risk_score": 4.0 if action == "WARN" else (10.0 if action == "BLOCK" else 0.0),
+                        "file_path": detail,
+                        "top_matches": [],
+                        "regulation_hits": [],
+                        "ai_explanation": ""
+                    }
+                client.enqueue_event(classification_result, channel, action)
 
         # Start SMTP Proxy
         if args.smtp_proxy:
@@ -287,6 +321,8 @@ def main():
                         "risk_score": file_report["risk_score"],
                         "matches_count": file_report["match_count"]
                     })
+                    if client:
+                        client.enqueue_event(file_report, "FILE", "BLOCK" if file_report["risk_level"] == "HIGH" and args.auto_quarantine else "ALLOW")
                     print(f"  Result: {file_report['risk_level']} (Score: {file_report['risk_score']})")
                 except Exception as e:
                     print(f"  Error conducting scan: {e}")
@@ -316,6 +352,8 @@ def main():
             from gui.main_window import MainWindow
             print("[*] Initializing Tkinter GUI...")
             app = MainWindow()
+            if client:
+                app.state["reporting_client"] = client
             app.mainloop()
         except ImportError as e:
             print(f"Error: Failed to launch Tkinter GUI: {e}", file=sys.stderr)

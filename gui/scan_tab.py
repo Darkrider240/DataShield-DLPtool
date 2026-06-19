@@ -260,6 +260,10 @@ class ScanTab(ttk.Frame):
                     "matches_count": file_report["match_count"]
                 })
                 
+                client = self.state.get("reporting_client")
+                if client:
+                    client.enqueue_event(file_report, "FILE", "BLOCK" if file_report["risk_level"] == "HIGH" and self.quarantine_var.get() else "ALLOW")
+                
             except Exception as e:
                 self.log_message(f"Error scanning {os.path.basename(file)}: {e}")
 
@@ -368,6 +372,10 @@ class ScanTab(ttk.Frame):
                 "risk_score": file_report["risk_score"],
                 "matches_count": file_report["match_count"]
             })
+
+            client = self.state.get("reporting_client")
+            if client:
+                client.enqueue_event(file_report, "FILE", "BLOCK" if file_report["risk_level"] == "HIGH" and self.quarantine_var.get() else "ALLOW")
             
             # Refresh tree views
             if hasattr(self.master.master, "results_tab"):
