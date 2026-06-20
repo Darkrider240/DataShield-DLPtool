@@ -6,7 +6,7 @@ from datetime import datetime
 
 # ── Auth ──────────────────────────────────────────────────────────────────────
 class LoginRequest(BaseModel):
-    email: EmailStr
+    email: str      # plain str — EmailStr rejects .local / reserved domains
     password: str
 
 class TokenResponse(BaseModel):
@@ -29,7 +29,7 @@ class UserOut(BaseModel):
 
 # ── Employee ──────────────────────────────────────────────────────────────────
 class EmployeeCreate(BaseModel):
-    email: EmailStr
+    email: str            # plain str — EmailStr rejects non-standard domains
     full_name: str = ""
     department: str = ""
     job_title: str = ""
@@ -54,11 +54,20 @@ class EmployeeOut(BaseModel):
 class FlagRequest(BaseModel):
     reason: str = "Manually flagged by admin"
 
+class MonitoringSettings(BaseModel):
+    """Per-employee monitoring channel controls."""
+    monitor_clipboard: bool = True
+    monitor_usb: bool = True
+    monitor_webmail: bool = True
+    monitor_file_scan: bool = True
+    model_config = {"from_attributes": True}
+
 
 # ── Agent ─────────────────────────────────────────────────────────────────────
 class AgentRegisterRequest(BaseModel):
     hostname: str
-    employee_email: EmailStr
+    employee_email: str       # plain str — EmailStr rejects .local domains
+    employee_name: str = ""   # optional full name from the login dialog
     platform: str
     agent_version: str
 
@@ -77,6 +86,8 @@ class HeartbeatResponse(BaseModel):
 
 # ── Event ─────────────────────────────────────────────────────────────────────
 class EventIngest(BaseModel):
+    agent_id: str = ""           # used to resolve the correct employee
+    employee_email: str = ""     # fallback if agent_id not yet assigned
     channel: str
     action_taken: str
     justification: str = ""

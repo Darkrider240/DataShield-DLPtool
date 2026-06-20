@@ -19,7 +19,7 @@ async def list_events(
     channel: str = Query(""),
     risk_level: str = Query(""),
     page: int = Query(1, ge=1),
-    per_page: int = Query(30, le=100),
+    per_page: int = Query(30, le=500),
     db: AsyncSession = Depends(get_db),
     current_user: AdminUser = Depends(get_current_user),
 ):

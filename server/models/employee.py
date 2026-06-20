@@ -29,5 +29,15 @@ class Employee(Base):
     # Envelope encryption DEK (encrypted with master key)
     encrypted_dek: Mapped[str] = mapped_column(Text, nullable=False, default="")
 
+    # Per-employee monitoring controls (toggled by admin per employee)
+    monitor_clipboard: Mapped[bool] = mapped_column(Boolean, default=True)
+    monitor_usb: Mapped[bool] = mapped_column(Boolean, default=True)
+    monitor_webmail: Mapped[bool] = mapped_column(Boolean, default=True)
+    monitor_file_scan: Mapped[bool] = mapped_column(Boolean, default=True)
+
+    # PIN authentication (hashed, set by admin, changed by employee on first login)
+    pin_hash: Mapped[str | None] = mapped_column(String, nullable=True, default=None)
+    pin_set: Mapped[bool] = mapped_column(Boolean, default=False)
+
     created_at: Mapped[DateTime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     updated_at: Mapped[DateTime] = mapped_column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())

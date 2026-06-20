@@ -35,7 +35,7 @@ async def register_agent(body: AgentRegisterRequest, db: AsyncSession = Depends(
     if not employee:
         employee = Employee(
             email=body.employee_email,
-            full_name=body.hostname,
+            full_name=body.employee_name or body.hostname,
             encrypted_dek=create_employee_dek(),
         )
         db.add(employee)
@@ -96,22 +96,35 @@ async def get_policy(agent_id: str, db: AsyncSession = Depends(get_db)):
 
 
 @router.post("/events", status_code=200, dependencies=[Depends(_verify_agent_key)])
-async def ingest_events(body: list[EventIngest], x_datashield_agent_key: str = Header(...), db: AsyncSession = Depends(get_db)):
-    # Resolve agent from key header — simplified: agent_id passed in header or derived
-    # For batch ingest we match by agent key; agent_id must be supplied per event batch
-    # Here we process events without strict agent_id resolution for simplicity
+async def ingest_events(
+    body: list[EventIngest],
+    x_datashield_agent_key: str = Header(...),
+    db: AsyncSession = Depends(get_db)
+):
     for ev_data in body:
-        # Resolve employee
-        # NOTE: real impl would pass agent_id; we skip for brevity
-        emp_result = await db.execute(select(Employee).limit(1))  # placeholder
-        employee = emp_result.scalar_one_or_none()
+        # Resolve agent → employee
+        employee = None
+
+        # Prefer agent_id lookup for correct employee attribution
+        if ev_data.agent_id:
+            agent_r = await db.execute(select(Agent).where(Agent.id == ev_data.agent_id))
+            agent_obj = agent_r.scalar_one_or_none()
+            if agent_obj:
+                emp_r = await db.execute(select(Employee).where(Employee.id == agent_obj.employee_id))
+                employee = emp_r.scalar_one_or_none()
+
+        # Fallback: match by employee_email if present
+        if not employee and ev_data.employee_email:
+            emp_r = await db.execute(select(Employee).where(Employee.email == ev_data.employee_email))
+            employee = emp_r.scalar_one_or_none()
+
         if not employee:
             continue
 
         dek = get_employee_dek(employee.encrypted_dek)
         event = DLPEvent(
             employee_id=employee.id,
-            agent_id="",
+            agent_id=ev_data.agent_id or "",
             channel=ev_data.channel,
             action_taken=ev_data.action_taken,
             justification=ev_data.justification,
@@ -128,6 +141,13 @@ async def ingest_events(body: list[EventIngest], x_datashield_agent_key: str = H
         await db.flush()
         await recalculate_risk(employee.id, db)
         await evaluate_event(event, db, ws_manager)
-        await ws_manager.broadcast({"type": "EVENT", "channel": event.channel, "risk_level": event.risk_level, "employee_id": employee.id})
+        await ws_manager.broadcast({
+            "type": "EVENT",
+            "channel": event.channel,
+            "risk_level": event.risk_level,
+            "employee_id": str(employee.id),
+            "employee_email": employee.email,
+        })
 
+    await db.commit()
     return {"status": "ok", "ingested": len(body)}

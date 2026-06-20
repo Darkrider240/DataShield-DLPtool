@@ -3,7 +3,7 @@ import sys
 import json
 import tempfile
 import threading
-from http.server import HTTPServer, BaseHTTPRequestHandler
+from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 from pathlib import Path
 
 # DataShield components
@@ -11,6 +11,7 @@ import scanner
 import behaviour
 import classifier
 import comms.comms_engine as comms_engine
+
 
 class ScanHTTPRequestHandler(BaseHTTPRequestHandler):
     def log_message(self, format, *args):
@@ -161,14 +162,15 @@ class DataShieldHTTPServer:
         self.host = host
         self.port = port
         self.on_event_callback = on_event_callback
-        
-        # Instantiate HTTPServer
-        self.server = HTTPServer((self.host, self.port), ScanHTTPRequestHandler)
+
+        # ThreadingHTTPServer handles each request in its own thread
+        self.server = ThreadingHTTPServer((self.host, self.port), ScanHTTPRequestHandler)
         self.server.state = state
         self.server.on_event_callback = on_event_callback
-        
+
         self.thread = None
         self.running = False
+
 
     def start(self):
         if self.running:

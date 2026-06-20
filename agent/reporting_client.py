@@ -28,6 +28,7 @@ class ServerReportingClient:
         payload = {
             "hostname": hostname,
             "employee_email": employee_email,
+            "employee_name": getattr(self, "employee_name", "") or hostname,
             "platform": platform,
             "agent_version": agent_version
         }
@@ -109,17 +110,19 @@ class ServerReportingClient:
                         regulation_tags.append(t)
 
         event_payload = {
-            "channel": channel,
-            "action_taken": action,
-            "justification": justification,
-            "risk_level": classification_result.get("risk_level", "CLEAN"),
-            "risk_score": classification_result.get("risk_score", 0.0),
-            "file_path": classification_result.get("file_path", ""),
+            "agent_id":       self.agent_id or "",
+            "employee_email": os.environ.get("EMPLOYEE_EMAIL", ""),
+            "channel":        channel,
+            "action_taken":   action,
+            "justification":  justification,
+            "risk_level":     classification_result.get("risk_level", "CLEAN"),
+            "risk_score":     classification_result.get("risk_score", 0.0),
+            "file_path":      classification_result.get("file_path", ""),
             "matched_value_redacted": matched_value_redacted,
-            "pattern_names": pattern_names,
+            "pattern_names":  pattern_names,
             "regulation_tags": regulation_tags,
             "ai_explanation": classification_result.get("ai_explanation", ""),
-            "occurred_at": time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())
+            "occurred_at":    time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())
         }
         await self._event_queue.put(event_payload)
 

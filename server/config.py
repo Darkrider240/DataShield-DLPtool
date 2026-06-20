@@ -8,7 +8,11 @@ from functools import lru_cache
 
 
 class Settings(BaseSettings):
-    model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
+    model_config = SettingsConfigDict(
+        env_file=["server/.env", ".env"],   # works from project root or server/
+        env_file_encoding="utf-8",
+        extra="ignore",
+    )
 
     # ── Database ──────────────────────────────────────────────────────────────
     DATABASE_URL: str = "postgresql+asyncpg://datashield:datashield@localhost:5432/datashield"
