@@ -51,7 +51,16 @@ export interface DLPEvent {
   regulation_tags: string[];
   occurred_at: string;
   ingested_at: string;
-  file_path?: string;
+  // Employee attribution (resolved server-side from employee table)
+  employee_name?:  string;
+  employee_email?: string;
+  employee_dept?:  string;
+  // Email metadata (WEBMAIL / EMAIL channel only)
+  sender_email?:     string;
+  recipient_emails?: string;
+  email_subject?:    string;
+  // Decrypted fields (analyst / superadmin only)
+  file_path?:      string;
   ai_explanation?: string;
 }
 

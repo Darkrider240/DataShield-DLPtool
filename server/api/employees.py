@@ -59,6 +59,7 @@ async def flag_employee(employee_id: str, body: FlagRequest, db: AsyncSession = 
     emp.flag_reason = body.reason
     emp.flagged_at = datetime.now(timezone.utc)
     emp.flagged_by = current_user.email
+    await db.commit()
     return {"status": "flagged"}
 
 
@@ -71,6 +72,7 @@ async def unflag_employee(employee_id: str, db: AsyncSession = Depends(get_db)):
     emp.is_flagged = False
     emp.flag_reason = ""
     emp.flagged_at = None
+    await db.commit()
     return {"status": "unflagged"}
 
 

@@ -1,0 +1,220 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>DataShield DLP</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+
+    body {
+      width: 300px;
+      background: #0b0f1a;
+      font-family: 'Segoe UI', Arial, sans-serif;
+      color: #e2e8f0;
+    }
+
+    .header {
+      background: #0f172a;
+      padding: 18px 20px 14px;
+      border-bottom: 1px solid #1e293b;
+      display: flex;
+      align-items: center;
+      gap: 12px;
+    }
+
+    .logo {
+      font-size: 28px;
+    }
+
+    .brand h1 {
+      font-size: 16px;
+      color: #6366f1;
+      font-weight: 700;
+    }
+
+    .brand p {
+      font-size: 10px;
+      color: #475569;
+      margin-top: 2px;
+    }
+
+    .status-card {
+      margin: 14px 16px;
+      background: #0f172a;
+      border-radius: 8px;
+      padding: 14px 16px;
+      border: 1px solid #1e293b;
+    }
+
+    .status-row {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+    }
+
+    .status-label {
+      font-size: 11px;
+      color: #64748b;
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+    }
+
+    .badge {
+      display: inline-flex;
+      align-items: center;
+      gap: 5px;
+      padding: 3px 10px;
+      border-radius: 20px;
+      font-size: 11px;
+      font-weight: 700;
+    }
+
+    .badge.active   { background: #14532d; color: #22c55e; }
+    .badge.inactive { background: #450a0a; color: #ef4444; }
+
+    .dot {
+      width: 6px;
+      height: 6px;
+      border-radius: 50%;
+    }
+
+    .dot.green  { background: #22c55e; animation: pulse 2s infinite; }
+    .dot.red    { background: #ef4444; }
+
+    @keyframes pulse {
+      0%, 100% { opacity: 1; }
+      50%       { opacity: 0.4; }
+    }
+
+    .channels {
+      margin: 0 16px 14px;
+    }
+
+    .channels h3 {
+      font-size: 10px;
+      color: #475569;
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+      margin-bottom: 8px;
+    }
+
+    .channel-row {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 6px 0;
+      border-bottom: 1px solid #1e293b;
+      font-size: 12px;
+    }
+
+    .channel-row:last-child { border-bottom: none; }
+
+    .channel-name {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      color: #94a3b8;
+    }
+
+    .ch-icon { font-size: 14px; }
+
+    .ch-status {
+      font-size: 10px;
+      font-weight: 600;
+    }
+
+    .ch-status.on  { color: #22c55e; }
+    .ch-status.off { color: #475569; }
+
+    .footer {
+      padding: 12px 16px;
+      border-top: 1px solid #1e293b;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+    }
+
+    .footer span {
+      font-size: 9px;
+      color: #334155;
+    }
+
+    .server-url {
+      font-size: 9px;
+      color: #334155;
+      font-family: monospace;
+    }
+
+    .no-agent {
+      margin: 14px 16px;
+      background: #1c0a0a;
+      border: 1px solid #7f1d1d;
+      border-radius: 8px;
+      padding: 14px;
+      font-size: 12px;
+      color: #fca5a5;
+      line-height: 1.5;
+    }
+
+    .no-agent strong {
+      display: block;
+      color: #ef4444;
+      font-size: 13px;
+      margin-bottom: 6px;
+    }
+  </style>
+</head>
+<body>
+
+<div class="header">
+  <div class="logo">🛡</div>
+  <div class="brand">
+    <h1>DataShield</h1>
+    <p>Enterprise Data Loss Prevention</p>
+  </div>
+</div>
+
+<div class="status-card">
+  <div class="status-row">
+    <span class="status-label">Agent Status</span>
+    <span class="badge" id="agent-badge">
+      <span class="dot" id="status-dot"></span>
+      <span id="agent-status-text">Checking…</span>
+    </span>
+  </div>
+</div>
+
+<div id="agent-ok" style="display:none">
+  <div class="channels">
+    <h3>Active Channels</h3>
+    <div class="channel-row">
+      <span class="channel-name"><span class="ch-icon">📧</span> Webmail (Gmail / Outlook)</span>
+      <span class="ch-status on">ACTIVE</span>
+    </div>
+    <div class="channel-row">
+      <span class="channel-name"><span class="ch-icon">📋</span> Clipboard Monitor</span>
+      <span class="ch-status on" id="ch-clipboard">ACTIVE</span>
+    </div>
+    <div class="channel-row">
+      <span class="channel-name"><span class="ch-icon">💾</span> USB Drive Monitor</span>
+      <span class="ch-status on" id="ch-usb">ACTIVE</span>
+    </div>
+  </div>
+</div>
+
+<div id="agent-down" class="no-agent" style="display:none">
+  <strong>⚠ DataShield Agent Not Running</strong>
+  Email protection is disabled. Run the DataShield agent on your workstation to activate DLP protection.
+  <br><br>
+  <code style="font-size:10px; color:#94a3b8;">python main.py</code>
+</div>
+
+<div class="footer">
+  <span>DataShield v1.0</span>
+  <span class="server-url" id="server-addr">127.0.0.1:5000</span>
+</div>
+
+<script src="popup.js"></script>
+</body>
+</html>

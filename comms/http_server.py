@@ -8,7 +8,7 @@ from pathlib import Path
 
 # DataShield components
 import scanner
-import behaviour
+import scanner_analysis as behaviour  # scanner_analysis is the correct module name
 import classifier
 import comms.comms_engine as comms_engine
 
@@ -44,10 +44,11 @@ class ScanHTTPRequestHandler(BaseHTTPRequestHandler):
             post_data = self.rfile.read(content_length)
             payload = json.loads(post_data.decode('utf-8'))
 
-            subject = payload.get("subject", "")
-            body = payload.get("body", "")
+            subject    = payload.get("subject", "")
+            body       = payload.get("body", "")
             recipients = payload.get("recipients", "")
-            
+            sender     = payload.get("sender", "")   # employee's own email address
+
             full_scan_text = f"Subject: {subject}\nBody:\n{body}"
 
             # 1. Create a temporary scan file
@@ -85,16 +86,20 @@ class ScanHTTPRequestHandler(BaseHTTPRequestHandler):
             # Reroute alert logs to GUI if hook present
             if self.server.on_event_callback:
                 pattern_info = decision.top_pattern if classification["top_matches"] else "CLEAN"
-                self.server.on_event_callback("WEBMAIL", decision.action, f"{pattern_info} in email to {recipients}", decision=decision)
+                detail = f"{pattern_info} | From: {sender or 'unknown'} -> To: {recipients or 'unknown'}"
+                self.server.on_event_callback("WEBMAIL", decision.action, detail, decision=decision)
 
-            # Respond with decision action details
+            # Respond with decision + attribution echo
             response_data = {
-                "action": decision.action,
-                "risk_level": decision.risk_level,
-                "risk_score": decision.risk_score,
-                "top_pattern": decision.top_pattern,
-                "regulations": decision.regulation_tags,
-                "explanation": comms_engine.format_warning_message(decision) if decision.action != "ALLOW" else ""
+                "action":       decision.action,
+                "risk_level":   decision.risk_level,
+                "risk_score":   decision.risk_score,
+                "top_pattern":  decision.top_pattern,
+                "regulations":  decision.regulation_tags,
+                "explanation":  comms_engine.format_warning_message(decision) if decision.action != "ALLOW" else "",
+                "sender":       sender,
+                "recipients":   recipients,
+                "subject":      subject,
             }
 
             self.send_response(200)
@@ -116,32 +121,28 @@ class ScanHTTPRequestHandler(BaseHTTPRequestHandler):
             post_data = self.rfile.read(content_length)
             payload = json.loads(post_data.decode('utf-8'))
 
-            action = payload.get("action")  # "BLOCK" | "ALLOW"
-            subject = payload.get("subject", "No Subject")
-            recipients = payload.get("recipients", "")
-            top_pattern = payload.get("top_pattern", "None")
+            action        = payload.get("action")          # "BLOCK" | "ALLOW"
+            subject       = payload.get("subject", "No Subject")
+            recipients    = payload.get("recipients", "")
+            sender        = payload.get("sender", "")      # employee's own email
+            top_pattern   = payload.get("top_pattern", "None")
             justification = payload.get("justification", "")
-            reason = payload.get("reason", "")
+            reason        = payload.get("reason", "")
 
-            # Log actual event into audit trail
+            log_entry = {
+                "subject":      subject,
+                "sender":       sender,
+                "recipients":   [recipients],
+                "top_pattern":  top_pattern,
+                "channel":      "WEBMAIL",
+            }
+
             if action == "ALLOW":
-                self.server.state["audit_logger"].log("EMAIL_ALLOWED", {
-                    "subject": subject,
-                    "sender": "Webmail Client",
-                    "recipients": [recipients],
-                    "top_pattern": top_pattern,
-                    "justification": justification,
-                    "channel": "WEBMAIL"
-                })
+                log_entry["justification"] = justification
+                self.server.state["audit_logger"].log("EMAIL_ALLOWED", log_entry)
             else:  # BLOCK
-                self.server.state["audit_logger"].log("EMAIL_BLOCKED", {
-                    "subject": subject,
-                    "sender": "Webmail Client",
-                    "recipients": [recipients],
-                    "top_pattern": top_pattern,
-                    "reason": reason or "DLP violation",
-                    "channel": "WEBMAIL"
-                })
+                log_entry["reason"] = reason or "DLP violation"
+                self.server.state["audit_logger"].log("EMAIL_BLOCKED", log_entry)
 
             self.send_response(200)
             self.send_header("Content-Type", "application/json")

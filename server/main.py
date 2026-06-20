@@ -20,6 +20,9 @@ scheduler = AsyncIOScheduler()
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    # Guard against shipping with default CHANGEME secrets
+    _validate_secrets()
+
     # Create tables (dev convenience; use Alembic for production)
     await create_all_tables()
 
@@ -33,6 +36,22 @@ async def lifespan(app: FastAPI):
     yield
 
     scheduler.shutdown(wait=False)
+
+
+def _validate_secrets():
+    """Refuse to start with unchanged default secrets."""
+    dangerous = [
+        ("JWT_SECRET_KEY",        settings.JWT_SECRET_KEY,        "CHANGEME"),
+        ("MASTER_KEY_PASSPHRASE", settings.MASTER_KEY_PASSPHRASE, "CHANGEME"),
+        ("AGENT_API_KEY",         settings.AGENT_API_KEY,         "CHANGEME"),
+    ]
+    bad = [name for name, val, marker in dangerous if marker in val]
+    if bad:
+        raise RuntimeError(
+            f"[DataShield] FATAL: The following secrets still have CHANGEME defaults:\n"
+            f"  {', '.join(bad)}\n"
+            f"Set them in your .env file before starting the server."
+        )
 
 
 async def _run_anomaly_check():

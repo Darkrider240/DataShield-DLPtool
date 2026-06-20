@@ -1,4 +1,4 @@
-﻿"""Initial schema — all DataShield Enterprise tables.
+"""Initial schema — all DataShield Enterprise tables.
 
 Revision ID: 001_initial
 Revises:
@@ -47,6 +47,7 @@ def upgrade():
         sa.Column('is_flagged',            sa.Boolean, server_default='false'),
         sa.Column('flag_reason',           sa.String,  server_default=''),
         sa.Column('flagged_at',            sa.DateTime(timezone=True), nullable=True),
+        sa.Column('flagged_by',            sa.String,  server_default=''),
         sa.Column('is_active',             sa.Boolean, server_default='true'),
         # Per-employee monitoring channel controls
         sa.Column('monitor_clipboard',     sa.Boolean, server_default='true'),
@@ -54,6 +55,7 @@ def upgrade():
         sa.Column('monitor_webmail',       sa.Boolean, server_default='true'),
         sa.Column('monitor_file_scan',     sa.Boolean, server_default='true'),
         sa.Column('created_at',            sa.DateTime(timezone=True), server_default=sa.func.now()),
+        sa.Column('updated_at',            sa.DateTime(timezone=True), server_default=sa.func.now()),
     )
 
     # ── agents ────────────────────────────────────────────────────────────────
@@ -63,8 +65,10 @@ def upgrade():
         sa.Column('hostname',                sa.String,  nullable=False),
         sa.Column('employee_id',             sa.String,  nullable=False, index=True),
         sa.Column('employee_email',          sa.String,  nullable=False),
+        sa.Column('employee_name',           sa.String,  server_default=''),
         sa.Column('platform',                sa.String,  server_default=''),
         sa.Column('agent_version',           sa.String,  server_default=''),
+        sa.Column('policy_version',          sa.String,  server_default=''),
         sa.Column('is_active',               sa.Boolean, server_default='true'),
         sa.Column('policy_update_available', sa.Boolean, server_default='false'),
         sa.Column('last_heartbeat',          sa.DateTime(timezone=True), nullable=True),

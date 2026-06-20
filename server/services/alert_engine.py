@@ -5,7 +5,6 @@ to BOTH the admin and the affected employee.
 """
 import smtplib
 from datetime import datetime, timedelta, timezone
-from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, and_
@@ -31,16 +30,19 @@ async def evaluate_event(event: DLPEvent, db: AsyncSession, ws_manager=None) -> 
     if not employee:
         return None
 
-    # Risk threshold flag
+    # Auto-flag when risk score crosses the 20.0 threshold
     if employee.risk_score > 20.0 and not employee.is_flagged:
         employee.is_flagged = True
         employee.flag_reason = "Risk score threshold exceeded"
         employee.flagged_at = datetime.now(timezone.utc)
+        await db.flush()
         await _raise_or_escalate(
-            db, employee, event.id,
+            db, employee.id,
+            event.id,
             "Employee risk threshold exceeded",
             f"Employee {employee.email} risk score {employee.risk_score:.1f} exceeded threshold of 20.0.",
-            "CRITICAL", "", ws_manager
+            "CRITICAL", "",
+            ws_manager,
         )
 
     severity = _determine_severity(event, employee)
@@ -56,14 +58,16 @@ async def evaluate_event(event: DLPEvent, db: AsyncSession, ws_manager=None) -> 
     )
 
     return await _raise_or_escalate(
-        db, employee, event.id,
-        title, description, severity, top_pattern, ws_manager
+        db, employee.id,
+        event.id,
+        title, description, severity, top_pattern,
+        ws_manager,
     )
 
 
 async def _raise_or_escalate(
     db: AsyncSession,
-    employee: Employee,
+    employee_id: str,          # always a string ID — do the lookup here
     event_id: str | None,
     title: str,
     description: str,
@@ -71,11 +75,27 @@ async def _raise_or_escalate(
     top_pattern: str,
     ws_manager=None,
 ) -> Alert:
+    """
+    Create a new alert for this employee/pattern, or increment escalation_count
+    if an identical open alert already exists within the last 4 hours.
+    Broadcasts via WebSocket and dispatches SMTP if severity is HIGH/CRITICAL.
+    """
+    # Resolve employee for email/name — needed for WS broadcast and email dispatch
+    emp_result = await db.execute(select(Employee).where(Employee.id == employee_id))
+    employee = emp_result.scalar_one_or_none()
+    if not employee:
+        # Employee deleted since event was ingested — create a minimal alert record
+        employee_email = ""
+        employee_name  = ""
+    else:
+        employee_email = employee.email
+        employee_name  = employee.full_name or employee.email
+
     cutoff = datetime.now(timezone.utc) - timedelta(hours=4)
     existing_result = await db.execute(
         select(Alert).where(
             and_(
-                Alert.employee_id == employee.id,
+                Alert.employee_id == employee_id,
                 Alert.top_pattern == top_pattern,
                 Alert.status == "OPEN",
                 Alert.created_at >= cutoff,
@@ -90,7 +110,7 @@ async def _raise_or_escalate(
         alert = existing
     else:
         alert = Alert(
-            employee_id=employee.id,
+            employee_id=employee_id,
             event_id=event_id,
             title=title,
             description=description,
@@ -109,20 +129,29 @@ async def _raise_or_escalate(
             "id": alert.id,
             "severity": alert.severity,
             "title": alert.title,
-            "employee_id": employee.id,
-            "employee_email": employee.email,
+            "employee_id": employee_id,
+            "employee_email": employee_email,
         })
 
-    # Send email to BOTH admin and the affected employee
-    await _dispatch_email(alert, severity, employee_email=employee.email, employee_name=employee.full_name or employee.email)
+    # Email both the admin team and the affected employee
+    await _dispatch_email(
+        alert, severity,
+        employee_email=employee_email,
+        employee_name=employee_name,
+    )
     return alert
 
 
-async def _dispatch_email(alert: Alert, severity: str, employee_email: str = "", employee_name: str = ""):
+async def _dispatch_email(
+    alert: Alert, severity: str,
+    employee_email: str = "",
+    employee_name: str = "",
+):
     """Send SMTP alert to admin recipients AND the affected employee."""
     if severity not in ("CRITICAL", "HIGH"):
         return
-    if not settings.SMTP_HOST:
+    # Only attempt SMTP if a non-localhost host is configured
+    if not settings.SMTP_HOST or settings.SMTP_HOST == "localhost":
         return
 
     admin_recipients = settings.alert_email_recipient_list or []
@@ -135,9 +164,8 @@ async def _dispatch_email(alert: Alert, severity: str, employee_email: str = "",
     if not all_recipients:
         return
 
-    is_employee_included = employee_email in all_recipients
+    subject = f"[DataShield] {alert.severity} Alert: {alert.title}"
 
-    # Admin-facing body
     admin_body = (
         f"DataShield Enterprise — Security Alert\n"
         f"{'='*50}\n\n"
@@ -150,7 +178,6 @@ async def _dispatch_email(alert: Alert, severity: str, employee_email: str = "",
         f"Dashboard : http://localhost:5173"
     )
 
-    # Employee-facing body (less technical, more human)
     employee_body = (
         f"Hi {employee_name or 'there'},\n\n"
         f"DataShield has detected a potential data policy violation on your account.\n\n"
@@ -162,28 +189,25 @@ async def _dispatch_email(alert: Alert, severity: str, employee_email: str = "",
         f"— DataShield Security System"
     )
 
-    subject = f"[DataShield] {alert.severity} Alert: {alert.title}"
-
     try:
         with smtplib.SMTP(settings.SMTP_HOST, settings.SMTP_PORT, timeout=5) as server:
             if settings.SMTP_USER:
                 server.starttls()
                 server.login(settings.SMTP_USER, settings.SMTP_PASSWORD)
 
-            # Send admin email (all admin recipients together)
             if admin_recipients:
                 msg = MIMEText(admin_body)
                 msg["Subject"] = subject
-                msg["From"] = settings.SMTP_FROM
-                msg["To"] = ", ".join(admin_recipients)
+                msg["From"]    = settings.SMTP_FROM
+                msg["To"]      = ", ".join(admin_recipients)
                 server.send_message(msg)
 
-            # Send separate, friendlier email to the employee
-            if employee_email and is_employee_included and employee_email not in admin_recipients:
+            # Send a friendlier, separate email to the employee only
+            if employee_email and employee_email not in admin_recipients:
                 emp_msg = MIMEText(employee_body)
-                emp_msg["Subject"] = f"[DataShield] Security Notice — Action on your account detected"
-                emp_msg["From"] = settings.SMTP_FROM
-                emp_msg["To"] = employee_email
+                emp_msg["Subject"] = "[DataShield] Security Notice — Action on your account detected"
+                emp_msg["From"]    = settings.SMTP_FROM
+                emp_msg["To"]      = employee_email
                 server.send_message(emp_msg)
 
     except Exception as e:

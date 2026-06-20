@@ -65,20 +65,21 @@ async def recalculate_risk(employee_id: str, db: AsyncSession) -> float:
     emp_result = await db.execute(select(Employee).where(Employee.id == employee_id))
     emp = emp_result.scalar_one_or_none()
     if emp:
-        emp.risk_score = round(final_score, 2)
-        emp.high_violations_7d = high_count
+        emp.risk_score          = round(final_score, 2)
+        emp.high_violations_7d  = high_count
         emp.medium_violations_7d = medium_count
-        emp.total_events_30d = total_30d
+        emp.total_events_30d    = total_30d
+        emp.average_volume_30d  = round(daily_avg_30d * 7, 2)  # weekly expected baseline
         emp.risk_level = (
-            "HIGH" if final_score >= 10.0
+            "HIGH"   if final_score >= 10.0
             else "MEDIUM" if final_score >= 4.0
-            else "LOW" if final_score >= 1.0
+            else "LOW"    if final_score >= 1.0
             else "CLEAN"
         )
         if final_score >= 10.0 and not emp.is_flagged:
-            emp.is_flagged = True
-            emp.flag_reason = "Risk score threshold exceeded"
-            emp.flagged_at = now
+            emp.is_flagged    = True
+            emp.flag_reason   = "Risk score threshold exceeded"
+            emp.flagged_at    = now
         await db.flush()
 
     return final_score

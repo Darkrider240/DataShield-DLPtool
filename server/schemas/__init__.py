@@ -13,6 +13,9 @@ class TokenResponse(BaseModel):
     access_token: str
     refresh_token: str
     token_type: str = "bearer"
+    role: Optional[str] = None
+    full_name: Optional[str] = None
+    email: Optional[str] = None
 
 class RefreshRequest(BaseModel):
     refresh_token: str
@@ -40,14 +43,21 @@ class EmployeeOut(BaseModel):
     full_name: str
     department: str
     job_title: str
+    is_active: bool
     risk_score: float
     risk_level: str
     high_violations_7d: int
     medium_violations_7d: int
     total_events_30d: int
+    average_volume_30d: float
     is_flagged: bool
     flag_reason: str
     flagged_at: Optional[datetime]
+    pin_set: bool
+    monitor_clipboard: bool
+    monitor_usb: bool
+    monitor_webmail: bool
+    monitor_file_scan: bool
     created_at: datetime
     model_config = {"from_attributes": True}
 
@@ -99,6 +109,10 @@ class EventIngest(BaseModel):
     regulation_tags: List[str] = []
     ai_explanation: str = ""
     occurred_at: datetime
+    # Email attribution (populated for WEBMAIL/EMAIL events)
+    sender_email:     str = ""
+    recipient_emails: str = ""
+    email_subject:    str = ""
 
 class EventOut(BaseModel):
     id: str
@@ -113,8 +127,16 @@ class EventOut(BaseModel):
     regulation_tags: List[str]
     occurred_at: datetime
     ingested_at: datetime
+    # Employee info — resolved by JOIN in the events API
+    employee_name:  Optional[str] = None
+    employee_email: Optional[str] = None
+    employee_dept:  Optional[str] = None
+    # Email attribution (WEBMAIL / EMAIL events only)
+    sender_email:     Optional[str] = None
+    recipient_emails: Optional[str] = None
+    email_subject:    Optional[str] = None
     # Decrypted fields — only populated for authorized roles
-    file_path: Optional[str] = None
+    file_path:      Optional[str] = None
     ai_explanation: Optional[str] = None
     model_config = {"from_attributes": True}
 

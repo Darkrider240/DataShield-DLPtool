@@ -186,7 +186,7 @@ class OverviewTab(tk.Frame):
 
     def refresh(self):
         def _load():
-            metrics = self.api.get("/api/reports/metrics")
+            metrics = self.api.get("/api/reports/overview")
             agents  = self.api.get("/api/agents")
             self.after(0, lambda: self._apply(metrics, agents))
         threading.Thread(target=_load, daemon=True).start()

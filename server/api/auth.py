@@ -44,10 +44,14 @@ async def login(body: LoginRequest, db: AsyncSession = Depends(get_db)):
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Account disabled")
     user.last_login = datetime.now(timezone.utc)
     await db.commit()
-    return TokenResponse(
-        access_token=_make_access_token(user.id),
-        refresh_token=_make_refresh_token(user.id)
-    )
+    return {
+        "access_token":  _make_access_token(user.id),
+        "refresh_token": _make_refresh_token(user.id),
+        "token_type":    "bearer",
+        "role":          user.role,
+        "full_name":     user.full_name,
+        "email":         user.email,
+    }
 
 
 @router.post("/refresh", response_model=TokenResponse)
