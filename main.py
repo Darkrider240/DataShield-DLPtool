@@ -178,13 +178,40 @@ def run_system_tray(name: str, email: str):
                 pass
 
     def _scan_now(icon, item):
+        """
+        Tray menu: '📁 Scan Folder Before Sending'
+        Opens a folder picker in the main thread, then triggers
+        trigger_scan_folder() on the MainWindow — the unique employee
+        capability to scan a local folder before sending documents.
+        """
         win = _tray_state.get("main_window")
-        if win and hasattr(win, "trigger_scan"):
-            try:
-                win.deiconify()
-                win.trigger_scan()
-            except Exception:
-                pass
+        if win and win.winfo_exists():
+            def _pick_and_scan():
+                from tkinter import filedialog
+                folder = filedialog.askdirectory(
+                    title="Select Folder to Scan Before Sending",
+                    parent=win,
+                )
+                if folder and hasattr(win, "trigger_scan_folder"):
+                    win.trigger_scan_folder(folder)
+            win.after(0, _pick_and_scan)
+        else:
+            # Window not open yet — open it first, then scan
+            def _open_then_scan():
+                import tkinter as tk
+                from tkinter import filedialog
+                dummy = tk.Tk()
+                dummy.withdraw()
+                folder = filedialog.askdirectory(
+                    title="Select Folder to Scan Before Sending",
+                )
+                dummy.destroy()
+                if folder:
+                    w = _tray_state.get("main_window")
+                    if w and hasattr(w, "trigger_scan_folder"):
+                        w.after(0, lambda: w.trigger_scan_folder(folder))
+            import threading
+            threading.Thread(target=_open_then_scan, daemon=True).start()
 
     def _exit_agent(icon, item):
         print("[*] DataShield agent stopping...")
@@ -207,10 +234,10 @@ def run_system_tray(name: str, email: str):
         pystray.MenuItem(f"DataShield  —  {name}", None, enabled=False),
         pystray.MenuItem(f"{email}", None, enabled=False),
         pystray.Menu.SEPARATOR,
-        pystray.MenuItem("Open DataShield",    _open_window, default=True),
-        pystray.MenuItem("Scan Files Now",     _scan_now),
+        pystray.MenuItem("Open DataShield",              _open_window, default=True),
+        pystray.MenuItem("Scan Folder Before Sending",   _scan_now),
         pystray.Menu.SEPARATOR,
-        pystray.MenuItem("Exit DataShield",    _exit_agent),
+        pystray.MenuItem("Exit DataShield",              _exit_agent),
     )
 
     icon = pystray.Icon("DataShield", img, f"DataShield  ({name})", menu)

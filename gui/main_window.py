@@ -147,6 +147,38 @@ class MainWindow(tk.Tk):
 
         self.notebook.bind("<<NotebookTabChanged>>", self.on_tab_changed)
 
+    def trigger_scan_folder(self, folder: str = ""):
+        """
+        Called from the system tray 'Scan Folder Before Sending' menu item.
+
+        This is the UNIQUE capability of the endpoint agent —
+        scan a local folder before sending bulk documents externally.
+        No browser-based dashboard can access the local file system.
+
+        Flow:
+          1. Open folder picker (if no folder given)
+          2. Show & focus this window
+          3. Switch to the Scan Files tab
+          4. Pre-fill the directory and auto-start the scan
+        """
+        if not folder:
+            folder = filedialog.askdirectory(
+                title="Select Folder to Scan Before Sending",
+                parent=self,
+            )
+        if not folder:
+            return  # user cancelled
+
+        self.deiconify()
+        self.lift()
+        self.focus_force()
+        self.notebook.select(0)   # Scan Files is always tab index 0
+
+        if hasattr(self, "scan_tab"):
+            self.scan_tab.set_directory(folder)
+            self.after(250, self.scan_tab.start_scan)
+
+
 
     def toggle_comms_daemons(self):
         """Starts/stops background monitor daemons depending on Settings variables."""

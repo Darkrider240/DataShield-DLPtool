@@ -1,16 +1,18 @@
 """
 DataShield — Admin Management Console (Tkinter)
-─────────────────────────────────────────────────
-Purpose:
-  A local desktop console for admins to manage DataShield without a browser.
-  Useful for on-premises, offline, or quick-access scenarios.
+────────────────────────────────────────────────
+PURPOSE: Local IT Helpdesk & Employee Enrollment tool.
+This is NOT a duplicate of the web dashboard.
 
-  Tabs:
-    Overview   — live stats: employees, open alerts, today's events
-    Employees  — list all employees, set PIN, flag/unflag, add new
-    Alerts     — open alert inbox with acknowledge action
-    Policies   — view active policies, push updates to all agents
-    Settings   — encryption status, rotate keys, server info
+Web Dashboard  → remote monitoring, analytics, compliance, alerts, policies
+This Console   → enroll new employees, set PINs, configure monitoring,
+                  check which agents are connected/offline
+
+Tabs:
+  Overview         — quick stats + recent agent connections
+  Employees        — manage employees (PIN / monitoring / flag)
+  Enroll New       — step-by-step wizard to onboard a new employee
+  Agent Status     — which endpoints are connected/offline
 """
 import os
 import tkinter as tk
@@ -19,10 +21,7 @@ import threading
 import httpx
 from gui.monitoring_dialog import MonitoringDialog
 
-
-# ─────────────────────────────────────────────────────────────────────────────
-#  Colour / style constants  (matching the dark web dashboard palette)
-# ─────────────────────────────────────────────────────────────────────────────
+# ─── Colour palette (dark enterprise theme) ────────────────────────────────
 BG_MAIN  = "#0b0f1a"
 BG_CARD  = "#0f172a"
 BG_ROW   = "#1e293b"
@@ -38,18 +37,7 @@ WARN     = "#f59e0b"
 OK       = "#22c55e"
 BLUE     = "#3b82f6"
 
-SEV_COLORS = {
-    "CRITICAL": DANGER,
-    "HIGH":     "#f97316",
-    "MEDIUM":   WARN,
-    "LOW":      BLUE,
-}
-RISK_COLORS = {
-    "HIGH":   DANGER,
-    "MEDIUM": WARN,
-    "LOW":    BLUE,
-    "CLEAN":  OK,
-}
+RISK_COLORS = {"HIGH": DANGER, "MEDIUM": WARN, "LOW": BLUE, "CLEAN": OK}
 
 FONT      = ("Segoe UI", 10)
 FONT_BOLD = ("Segoe UI", 10, "bold")
@@ -96,6 +84,24 @@ class APIClient:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+#  Scrollable frame
+# ─────────────────────────────────────────────────────────────────────────────
+class ScrollFrame(tk.Frame):
+    def __init__(self, parent, **kw):
+        super().__init__(parent, **kw)
+        canvas = tk.Canvas(self, bg=kw.get("bg", BG_MAIN),
+                           highlightthickness=0)
+        sb = tk.Scrollbar(self, orient="vertical", command=canvas.yview)
+        self.inner = tk.Frame(canvas, bg=kw.get("bg", BG_MAIN))
+        self.inner.bind("<Configure>",
+            lambda e: canvas.configure(scrollregion=canvas.bbox("all")))
+        canvas.create_window((0, 0), window=self.inner, anchor="nw")
+        canvas.configure(yscrollcommand=sb.set)
+        sb.pack(side="right", fill="y")
+        canvas.pack(side="left", fill="both", expand=True)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 #  Reusable UI helpers
 # ─────────────────────────────────────────────────────────────────────────────
 def _section(parent, text):
@@ -139,24 +145,6 @@ def _stat_card(parent, label: str, value: str, color: str = ACCENT):
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-#  Scrollable frame
-# ─────────────────────────────────────────────────────────────────────────────
-class ScrollFrame(tk.Frame):
-    def __init__(self, parent, **kw):
-        super().__init__(parent, **kw)
-        canvas = tk.Canvas(self, bg=kw.get("bg", BG_MAIN),
-                           highlightthickness=0)
-        sb = tk.Scrollbar(self, orient="vertical", command=canvas.yview)
-        self.inner = tk.Frame(canvas, bg=kw.get("bg", BG_MAIN))
-        self.inner.bind("<Configure>",
-            lambda e: canvas.configure(scrollregion=canvas.bbox("all")))
-        canvas.create_window((0, 0), window=self.inner, anchor="nw")
-        canvas.configure(yscrollcommand=sb.set)
-        sb.pack(side="right", fill="y")
-        canvas.pack(side="left", fill="both", expand=True)
-
-
-# ─────────────────────────────────────────────────────────────────────────────
 #  Individual tab frames
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -168,71 +156,99 @@ class OverviewTab(tk.Frame):
         self.refresh()
 
     def _build(self):
-        tk.Label(self, text="System Overview", bg=BG_MAIN, fg=TEXT_PRI,
-                 font=FONT_H).pack(anchor="w", padx=20, pady=(20, 4))
-        tk.Label(self, text="Live statistics from the DataShield server",
-                 bg=BG_MAIN, fg=TEXT_MUT, font=FONT_SM).pack(anchor="w", padx=20)
-        tk.Frame(self, height=1, bg=BORDER).pack(fill="x", padx=20, pady=12)
+        # Header
+        tk.Label(self, text="IT Admin Overview", bg=BG_MAIN, fg=TEXT_PRI, font=FONT_H).pack(anchor="w", padx=20, pady=(20,2))
+        tk.Label(self, text="Quick view of employee enrollment and agent connections", bg=BG_MAIN, fg=TEXT_MUT, font=FONT_SM).pack(anchor="w", padx=20)
+        tk.Frame(self, height=1, bg=BORDER).pack(fill="x", padx=20, pady=10)
 
         # Stat cards row
         self._stat_row = tk.Frame(self, bg=BG_MAIN)
-        self._stat_row.pack(fill="x", padx=14, pady=(0, 16))
-        self._emp_card  = _stat_card(self._stat_row, "Employees",    "—", ACCENT)
-        self._alt_card  = _stat_card(self._stat_row, "Open Alerts",  "—", DANGER)
-        self._evt_card  = _stat_card(self._stat_row, "Events Today", "—", BLUE)
-        self._flg_card  = _stat_card(self._stat_row, "Flagged",      "—", WARN)
+        self._stat_row.pack(fill="x", padx=14, pady=(0,16))
+        self._emp_card    = _stat_card(self._stat_row, "Total Employees", "—", ACCENT)
+        self._online_card = _stat_card(self._stat_row, "Online Agents",   "—", OK)
+        self._flag_card   = _stat_card(self._stat_row, "Flagged",         "—", WARN)
+        self._today_card  = _stat_card(self._stat_row, "Events Today",    "—", BLUE)
 
-        # Refresh button
         btn_row = tk.Frame(self, bg=BG_MAIN)
         btn_row.pack(anchor="e", padx=20)
         _btn(btn_row, "↻  Refresh", self.refresh).pack()
 
-        # Recent alerts preview
-        _section(self, "Recent Open Alerts")
-        self._alert_frame = tk.Frame(self, bg=BG_MAIN)
-        self._alert_frame.pack(fill="x", padx=20)
+        # Recent connections
+        _section(self, "Recent Agent Connections")
+        self._conn_frame = tk.Frame(self, bg=BG_MAIN)
+        self._conn_frame.pack(fill="x", padx=20)
 
     def _update_stat(self, card_frame, value: str):
-        # The value label is the first child
         for w in card_frame.winfo_children():
-            if isinstance(w, tk.Label) and w.cget("font") and "26" in str(w.cget("font")):
+            if isinstance(w, tk.Label) and "26" in str(w.cget("font")):
                 w.config(text=value)
                 break
 
     def refresh(self):
         def _load():
-            metrics  = self.api.get("/api/reports/metrics")
-            alerts   = self.api.get("/api/alerts", status="OPEN", per_page=5)
-            emps     = self.api.get("/api/employees", per_page=1)
-
-            self.after(0, lambda: self._apply(metrics, alerts))
-
+            metrics = self.api.get("/api/reports/metrics")
+            agents  = self.api.get("/api/agents")
+            self.after(0, lambda: self._apply(metrics, agents))
         threading.Thread(target=_load, daemon=True).start()
 
-    def _apply(self, metrics: dict, alerts):
+    def _apply(self, metrics, agents):
         if "_error" not in metrics:
-            self._update_stat(self._emp_card,  str(metrics.get("total_employees", "—")))
-            self._update_stat(self._alt_card,  str(metrics.get("open_alerts", "—")))
-            self._update_stat(self._evt_card,  str(metrics.get("total_events", "—")))
-            self._update_stat(self._flg_card,  str(metrics.get("flagged_employees", "—")))
+            self._update_stat(self._emp_card,    str(metrics.get("total_employees", "—")))
+            self._update_stat(self._flag_card,   str(metrics.get("flagged_employees", "—")))
+            self._update_stat(self._today_card,  str(metrics.get("total_events", "—")))
 
-        for w in self._alert_frame.winfo_children():
+        # Count online agents (last heartbeat < 5 min)
+        if isinstance(agents, list):
+            from datetime import datetime, timezone, timedelta
+            now = datetime.now(timezone.utc)
+            online = 0
+            for a in agents:
+                hb = a.get("last_heartbeat", "")
+                if hb:
+                    try:
+                        dt = datetime.fromisoformat(hb.replace("Z","+00:00"))
+                        if (now - dt) < timedelta(minutes=5):
+                            online += 1
+                    except: pass
+            self._update_stat(self._online_card, str(online))
+
+        for w in self._conn_frame.winfo_children():
             w.destroy()
 
-        if isinstance(alerts, list) and alerts:
-            for a in alerts:
-                row = tk.Frame(self._alert_frame, bg=BG_ROW,
+        if isinstance(agents, list) and agents:
+            for a in agents[:6]:
+                row = tk.Frame(self._conn_frame, bg=BG_ROW,
                                highlightbackground=BORDER, highlightthickness=1)
-                row.pack(fill="x", pady=3, ipady=8, padx=0)
-                sev   = a.get("severity", "")
-                color = SEV_COLORS.get(sev, TEXT_SEC)
-                tk.Label(row, text=f"  ● {sev}", bg=BG_ROW, fg=color,
-                         font=FONT_BOLD, width=12, anchor="w").pack(side="left")
-                tk.Label(row, text=a.get("title", ""), bg=BG_ROW, fg=TEXT_PRI,
-                         font=FONT, anchor="w").pack(side="left", padx=8)
+                row.pack(fill="x", pady=2, ipady=8)
+
+                # Online indicator
+                try:
+                    from datetime import datetime, timezone, timedelta
+                    hb = a.get("last_heartbeat","")
+                    dt = datetime.fromisoformat(hb.replace("Z","+00:00"))
+                    is_online = (datetime.now(timezone.utc) - dt) < timedelta(minutes=5)
+                except:
+                    is_online = False
+
+                dot_color = OK if is_online else DANGER
+                tk.Label(row, text="●", bg=BG_ROW, fg=dot_color, font=FONT_BOLD, width=3).pack(side="left")
+                tk.Label(row, text=a.get("employee_name") or a.get("employee_email",""),
+                         bg=BG_ROW, fg=TEXT_PRI, font=FONT_BOLD, width=22, anchor="w").pack(side="left")
+                tk.Label(row, text=a.get("hostname","—"),
+                         bg=BG_ROW, fg=TEXT_SEC, font=FONT_MONO, width=18, anchor="w").pack(side="left")
+                hb_str = a.get("last_heartbeat","Never")
+                if hb_str and hb_str != "Never":
+                    try:
+                        from datetime import datetime, timezone
+                        dt2 = datetime.fromisoformat(hb_str.replace("Z","+00:00"))
+                        diff = datetime.now(timezone.utc) - dt2
+                        mins = int(diff.total_seconds()//60)
+                        hb_str = f"{mins}m ago" if mins < 60 else f"{mins//60}h ago"
+                    except: pass
+                tk.Label(row, text=hb_str, bg=BG_ROW, fg=TEXT_MUT, font=FONT_SM).pack(side="left", padx=8)
         else:
-            tk.Label(self._alert_frame, text="No open alerts  ✓",
-                     bg=BG_MAIN, fg=OK, font=FONT).pack(pady=12)
+            tk.Label(self._conn_frame, text="No agents connected yet.",
+                     bg=BG_MAIN, fg=TEXT_MUT, font=FONT).pack(pady=12)
 
 
 class EmployeesTab(tk.Frame):
@@ -251,10 +267,11 @@ class EmployeesTab(tk.Frame):
                  font=FONT_H).pack(side="left")
         btn_r = tk.Frame(hdr, bg=BG_MAIN)
         btn_r.pack(side="right")
-        _btn(btn_r, "+ Add Employee", self._add_employee).pack(side="left", padx=(0, 8))
         _btn(btn_r, "↻ Refresh", self.refresh,
              color=BG_ROW).pack(side="left")
 
+        tk.Label(self, text="Manage existing employees — reset PINs, configure monitoring, flag for review.",
+                 bg=BG_MAIN, fg=TEXT_MUT, font=FONT_SM).pack(anchor="w", padx=20, pady=(4, 0))
         tk.Frame(self, height=1, bg=BORDER).pack(fill="x", padx=20, pady=10)
 
         # Table header
@@ -283,8 +300,8 @@ class EmployeesTab(tk.Frame):
             w.destroy()
 
         if not employees:
-            tk.Label(self._rows_frame, text="No employees registered yet.",
-                     bg=BG_MAIN, fg=TEXT_MUT, font=FONT).pack(pady=24)
+            tk.Label(self._rows_frame, text="No employees registered yet.\nUse the '✚ Enroll New' tab to add your first employee.",
+                     bg=BG_MAIN, fg=TEXT_MUT, font=FONT, justify="center").pack(pady=24)
             return
 
         for i, emp in enumerate(employees):
@@ -437,98 +454,288 @@ class _AddEmployeeDialog(tk.Toplevel):
             self.destroy()
 
 
-class AlertsTab(tk.Frame):
+class EnrollmentWizardTab(tk.Frame):
+    """
+    Step-by-step employee enrollment wizard.
+    IT admin uses this when setting up a new employee's machine.
+    Steps: 1) Employee Info → 2) Set PIN → 3) Monitoring Channels → 4) Done
+    """
     def __init__(self, parent, api: APIClient):
         super().__init__(parent, bg=BG_MAIN)
         self.api = api
+        self._emp_id    = None   # set after Step 1 creates the employee
+        self._emp_name  = ""
+        self._emp_email = ""
+        self._step      = 0
+
+        self._frames = {}  # step_number → frame
         self._build()
-        self.refresh()
 
     def _build(self):
-        hdr = tk.Frame(self, bg=BG_MAIN)
-        hdr.pack(fill="x", padx=20, pady=(18, 0))
-        tk.Label(hdr, text="Alert Inbox", bg=BG_MAIN, fg=TEXT_PRI,
-                 font=FONT_H).pack(side="left")
-        _btn(hdr, "↻ Refresh", self.refresh, color=BG_ROW).pack(side="right")
-
-        tk.Frame(self, height=1, bg=BORDER).pack(fill="x", padx=20, pady=10)
-
-        sf = ScrollFrame(self, bg=BG_MAIN)
-        sf.pack(fill="both", expand=True, padx=20)
-        self._rows = sf.inner
-
-    def refresh(self):
-        def _load():
-            data = self.api.get("/api/alerts", status="OPEN", per_page=50)
-            self.after(0, lambda: self._render(data if isinstance(data, list) else []))
-        threading.Thread(target=_load, daemon=True).start()
-
-    def _render(self, alerts: list):
-        for w in self._rows.winfo_children():
-            w.destroy()
-
-        if not alerts:
-            tk.Label(self._rows, text="✓  No open alerts",
-                     bg=BG_MAIN, fg=OK, font=FONT).pack(pady=24)
-            return
-
-        for a in alerts:
-            sev   = a.get("severity", "")
-            color = SEV_COLORS.get(sev, TEXT_SEC)
-
-            row = tk.Frame(self._rows, bg=BG_ROW,
-                           highlightbackground=color, highlightthickness=1)
-            row.pack(fill="x", pady=4, ipady=10)
-
-            # Left: severity dot + info
-            left = tk.Frame(row, bg=BG_ROW)
-            left.pack(side="left", padx=12, fill="x", expand=True)
-            tk.Label(left, text=f"● {sev}", bg=BG_ROW, fg=color,
-                     font=FONT_BOLD).pack(anchor="w")
-            tk.Label(left, text=a.get("title", ""), bg=BG_ROW, fg=TEXT_PRI,
-                     font=FONT).pack(anchor="w")
-            tk.Label(left, text=a.get("description", "")[:100],
-                     bg=BG_ROW, fg=TEXT_MUT, font=FONT_SM,
-                     wraplength=500, anchor="w").pack(anchor="w")
-
-            # Right: acknowledge button
-            _btn(row, "✓ Acknowledge",
-                 lambda aid=a["id"]: self._ack(aid),
-                 color="#1e2d1e", fg=OK).pack(side="right", padx=12, ipady=4, ipadx=6)
-
-    def _ack(self, alert_id: str):
-        result = self.api.patch(f"/api/alerts/{alert_id}/acknowledge")
-        if "_error" not in result:
-            self.refresh()
-        else:
-            messagebox.showerror("Error", result["_error"], parent=self)
-
-
-class PoliciesTab(tk.Frame):
-    def __init__(self, parent, api: APIClient):
-        super().__init__(parent, bg=BG_MAIN)
-        self.api = api
-        self._build()
-        self.refresh()
-
-    def _build(self):
-        hdr = tk.Frame(self, bg=BG_MAIN)
-        hdr.pack(fill="x", padx=20, pady=(18, 0))
-        tk.Label(hdr, text="DLP Policies", bg=BG_MAIN, fg=TEXT_PRI,
-                 font=FONT_H).pack(side="left")
-        btn_r = tk.Frame(hdr, bg=BG_MAIN)
-        btn_r.pack(side="right")
-        _btn(btn_r, "⬆ Push to All Agents", self._push_all).pack(side="left", padx=(0, 8))
-        _btn(btn_r, "↻ Refresh", self.refresh, color=BG_ROW).pack(side="left")
-
-        tk.Label(self, text="Active rules pushed to all registered agent machines.",
+        # Page title
+        tk.Label(self, text="Enroll New Employee", bg=BG_MAIN, fg=TEXT_PRI, font=FONT_H).pack(anchor="w", padx=20, pady=(20,2))
+        tk.Label(self, text="Walk through these steps to add an employee and set up their DataShield agent.",
                  bg=BG_MAIN, fg=TEXT_MUT, font=FONT_SM).pack(anchor="w", padx=20)
         tk.Frame(self, height=1, bg=BORDER).pack(fill="x", padx=20, pady=10)
 
-        # Status bar
-        self._status_var = tk.StringVar(value="")
-        tk.Label(self, textvariable=self._status_var, bg=BG_MAIN, fg=OK,
-                 font=FONT_SM).pack(anchor="w", padx=20)
+        # Step indicator (breadcrumb)
+        self._step_bar = tk.Frame(self, bg=BG_MAIN)
+        self._step_bar.pack(fill="x", padx=20, pady=(0,12))
+        self._step_labels = []
+        for i, name in enumerate(["1. Employee Info", "2. Set PIN", "3. Monitoring", "4. Done"]):
+            lbl = tk.Label(self._step_bar, text=name, bg=BG_MAIN, fg=TEXT_MUT, font=FONT_SM)
+            lbl.pack(side="left", padx=(0, 24))
+            self._step_labels.append(lbl)
+
+        # Content area — different frame per step
+        self._content = tk.Frame(self, bg=BG_MAIN)
+        self._content.pack(fill="both", expand=True, padx=20)
+
+        self._build_step0()  # Employee info
+        self._build_step1()  # PIN
+        self._build_step2()  # Monitoring
+        self._build_step3()  # Done
+
+        self._show_step(0)
+
+    def _build_step0(self):
+        """Step 1: Employee info form."""
+        f = tk.Frame(self._content, bg=BG_MAIN)
+        self._frames[0] = f
+
+        card = tk.Frame(f, bg=BG_CARD, padx=28, pady=20,
+                        highlightbackground=BORDER, highlightthickness=1)
+        card.pack(fill="x", pady=4)
+
+        tk.Label(card, text="Employee Details", bg=BG_CARD, fg=TEXT_PRI, font=FONT_BOLD).pack(anchor="w", pady=(0,14))
+
+        self._fields = {}
+        for label, key, placeholder in [
+            ("Full Name *",   "full_name",  "Jane Smith"),
+            ("Work Email *",  "email",      "jane@company.com"),
+            ("Department",    "department", "Engineering"),
+            ("Job Title",     "job_title",  "Software Developer"),
+        ]:
+            tk.Label(card, text=label, bg=BG_CARD, fg=TEXT_SEC, font=FONT_SM, anchor="w").pack(fill="x", pady=(8,2))
+            var = tk.StringVar()
+            ent = tk.Entry(card, textvariable=var, bg=BG_ROW, fg=TEXT_PRI,
+                           insertbackground=TEXT_PRI, relief="flat", font=FONT, bd=0)
+            ent.pack(fill="x", ipady=9)
+            tk.Frame(card, height=1, bg=ACCENT).pack(fill="x")
+            self._fields[key] = var
+
+        self._step0_err = tk.StringVar()
+        tk.Label(card, textvariable=self._step0_err, bg=BG_CARD, fg=DANGER, font=FONT_SM).pack(anchor="w", pady=(8,0))
+
+        _btn(card, "Create Employee & Continue →", self._submit_step0).pack(
+            fill="x", ipady=11, pady=(16,0))
+
+    def _build_step1(self):
+        """Step 2: Set PIN."""
+        f = tk.Frame(self._content, bg=BG_MAIN)
+        self._frames[1] = f
+
+        card = tk.Frame(f, bg=BG_CARD, padx=28, pady=20,
+                        highlightbackground=BORDER, highlightthickness=1)
+        card.pack(fill="x", pady=4)
+
+        self._pin_target_label = tk.StringVar(value="Set a login PIN")
+        tk.Label(card, textvariable=self._pin_target_label, bg=BG_CARD, fg=TEXT_PRI, font=FONT_BOLD).pack(anchor="w", pady=(0,8))
+        tk.Label(card, text="The employee will use this PIN to sign in to their DataShield agent.",
+                 bg=BG_CARD, fg=TEXT_MUT, font=FONT_SM).pack(anchor="w", pady=(0,16))
+
+        tk.Label(card, text="PIN (min. 4 characters)", bg=BG_CARD, fg=TEXT_SEC, font=FONT_SM).pack(anchor="w")
+        self._pin_var = tk.StringVar()
+        tk.Entry(card, textvariable=self._pin_var, show="●", bg=BG_ROW, fg=TEXT_PRI,
+                 insertbackground=TEXT_PRI, relief="flat", font=FONT, bd=0).pack(fill="x", ipady=9)
+        tk.Frame(card, height=1, bg=ACCENT).pack(fill="x", pady=(0,12))
+
+        tk.Label(card, text="Confirm PIN", bg=BG_CARD, fg=TEXT_SEC, font=FONT_SM).pack(anchor="w")
+        self._pin2_var = tk.StringVar()
+        tk.Entry(card, textvariable=self._pin2_var, show="●", bg=BG_ROW, fg=TEXT_PRI,
+                 insertbackground=TEXT_PRI, relief="flat", font=FONT, bd=0).pack(fill="x", ipady=9)
+        tk.Frame(card, height=1, bg=ACCENT).pack(fill="x")
+
+        self._step1_err = tk.StringVar()
+        tk.Label(card, textvariable=self._step1_err, bg=BG_CARD, fg=DANGER, font=FONT_SM).pack(anchor="w", pady=(8,0))
+
+        btn_row = tk.Frame(card, bg=BG_CARD)
+        btn_row.pack(fill="x", pady=(16,0))
+        _btn(btn_row, "← Back", lambda: self._show_step(0), color=BG_ROW).pack(side="left", ipadx=12, ipady=9)
+        _btn(btn_row, "Set PIN & Continue →", self._submit_step1).pack(side="right", ipadx=12, ipady=9)
+
+    def _build_step2(self):
+        """Step 3: Monitoring channels."""
+        f = tk.Frame(self._content, bg=BG_MAIN)
+        self._frames[2] = f
+
+        card = tk.Frame(f, bg=BG_CARD, padx=28, pady=20,
+                        highlightbackground=BORDER, highlightthickness=1)
+        card.pack(fill="x", pady=4)
+
+        tk.Label(card, text="Configure Monitoring Channels", bg=BG_CARD, fg=TEXT_PRI, font=FONT_BOLD).pack(anchor="w", pady=(0,4))
+        tk.Label(card, text="Choose which DLP channels to enable for this employee. Defaults are all ON.",
+                 bg=BG_CARD, fg=TEXT_MUT, font=FONT_SM).pack(anchor="w", pady=(0,16))
+
+        self._mon_vars = {}
+        CHANNELS = [
+            ("monitor_clipboard", "📋 Clipboard Monitoring",  "Intercept sensitive copy/paste"),
+            ("monitor_usb",       "🔌 USB Drive Monitoring",  "Detect USB insertions"),
+            ("monitor_webmail",   "✉️  Webmail / Email",       "Scan outgoing email content"),
+            ("monitor_file_scan", "📁 File Scanning",          "Employee can scan files manually"),
+        ]
+        for key, label, desc in CHANNELS:
+            var = tk.BooleanVar(value=True)
+            self._mon_vars[key] = var
+            row = tk.Frame(card, bg=BG_CARD)
+            row.pack(fill="x", pady=6)
+            cb = tk.Checkbutton(row, variable=var, bg=BG_CARD, fg=TEXT_PRI,
+                                activebackground=BG_CARD, selectcolor=ACCENT,
+                                font=FONT_BOLD, text=label, cursor="hand2",
+                                anchor="w")
+            cb.pack(side="left")
+            tk.Label(row, text=f"  —  {desc}", bg=BG_CARD, fg=TEXT_MUT, font=FONT_SM).pack(side="left")
+
+        tk.Label(card, text="", bg=BG_CARD).pack()  # spacer
+
+        btn_row = tk.Frame(card, bg=BG_CARD)
+        btn_row.pack(fill="x", pady=(8,0))
+        _btn(btn_row, "← Back", lambda: self._show_step(1), color=BG_ROW).pack(side="left", ipadx=12, ipady=9)
+        _btn(btn_row, "Apply & Finish →", self._submit_step2).pack(side="right", ipadx=12, ipady=9)
+
+    def _build_step3(self):
+        """Step 4: Done."""
+        f = tk.Frame(self._content, bg=BG_MAIN)
+        self._frames[3] = f
+
+        card = tk.Frame(f, bg=BG_CARD, padx=28, pady=28,
+                        highlightbackground="#22c55e", highlightthickness=2)
+        card.pack(fill="x", pady=4)
+
+        tk.Label(card, text="✅ Employee Enrolled Successfully!", bg=BG_CARD, fg=OK,
+                 font=("Segoe UI", 14, "bold")).pack(anchor="w", pady=(0,8))
+
+        self._done_name_var = tk.StringVar(value="")
+        tk.Label(card, textvariable=self._done_name_var, bg=BG_CARD, fg=TEXT_PRI,
+                 font=FONT_BOLD).pack(anchor="w", pady=(0,16))
+
+        tk.Label(card, text="📋  Give the employee these setup instructions:",
+                 bg=BG_CARD, fg=TEXT_SEC, font=FONT_BOLD).pack(anchor="w", pady=(0,8))
+
+        steps_text = (
+            "  1. On their workstation, open a terminal and run:\n"
+            "         python main.py\n\n"
+            "  2. In the login screen, enter:\n"
+            "         Email  →  their work email\n"
+            "         PIN    →  the PIN you just set\n\n"
+            "  3. DataShield will activate and run silently in the system tray.\n\n"
+            "  4. They can right-click the tray icon to open the agent\n"
+            "     and scan files before sending."
+        )
+        tk.Label(card, text=steps_text, bg=BG_ROW, fg=TEXT_PRI, font=FONT_MONO,
+                 justify="left", anchor="w", padx=16, pady=12,
+                 relief="flat").pack(fill="x", pady=(0,16))
+
+        btn_row = tk.Frame(card, bg=BG_CARD)
+        btn_row.pack(fill="x")
+        _btn(btn_row, "+ Enroll Another Employee", self._reset_wizard).pack(side="left", ipadx=12, ipady=9)
+
+    def _show_step(self, step: int):
+        self._step = step
+        for s, frame in self._frames.items():
+            frame.pack_forget()
+        self._frames[step].pack(fill="both", expand=True)
+        # Update step indicator colors
+        for i, lbl in enumerate(self._step_labels):
+            if i < step:
+                lbl.config(fg=OK)
+            elif i == step:
+                lbl.config(fg=ACCENT)
+            else:
+                lbl.config(fg=TEXT_MUT)
+
+    def _submit_step0(self):
+        body = {k: v.get().strip() for k, v in self._fields.items()}
+        if not body["full_name"]:
+            self._step0_err.set("Full name is required."); return
+        if not body["email"] or "@" not in body["email"]:
+            self._step0_err.set("A valid email is required."); return
+        self._step0_err.set("Creating employee…")
+        def _do():
+            result = self.api.post("/api/employees", body)
+            if "_error" in result:
+                self.after(0, lambda: self._step0_err.set(f"Error: {result['_error']}"))
+            else:
+                self._emp_id    = result.get("id")
+                self._emp_name  = body["full_name"]
+                self._emp_email = body["email"]
+                self._pin_target_label.set(f"Set PIN for {self._emp_name}")
+                self.after(0, lambda: self._show_step(1))
+        threading.Thread(target=_do, daemon=True).start()
+
+    def _submit_step1(self):
+        pin  = self._pin_var.get()
+        pin2 = self._pin2_var.get()
+        if len(pin) < 4:
+            self._step1_err.set("PIN must be at least 4 characters."); return
+        if pin != pin2:
+            self._step1_err.set("PINs do not match."); return
+        self._step1_err.set("Setting PIN…")
+        def _do():
+            result = self.api.post(f"/api/employees/{self._emp_id}/set-pin", {"pin": pin})
+            if "_error" in result:
+                self.after(0, lambda: self._step1_err.set(f"Error: {result['_error']}"))
+            else:
+                self.after(0, lambda: self._show_step(2))
+        threading.Thread(target=_do, daemon=True).start()
+
+    def _submit_step2(self):
+        body = {k: v.get() for k, v in self._mon_vars.items()}
+        def _do():
+            result = self.api.patch(f"/api/employees/{self._emp_id}/monitoring", body)
+            self._done_name_var.set(
+                f"{self._emp_name}  ({self._emp_email})")
+            self.after(0, lambda: self._show_step(3))
+        threading.Thread(target=_do, daemon=True).start()
+
+    def _reset_wizard(self):
+        self._emp_id    = None
+        self._emp_name  = ""
+        self._emp_email = ""
+        for v in self._fields.values(): v.set("")
+        self._pin_var.set("")
+        self._pin2_var.set("")
+        for v in self._mon_vars.values(): v.set(True)
+        self._step0_err.set("")
+        self._step1_err.set("")
+        self._show_step(0)
+
+
+class AgentStatusTab(tk.Frame):
+    """Shows all registered endpoint agents with their connection status."""
+    def __init__(self, parent, api: APIClient):
+        super().__init__(parent, bg=BG_MAIN)
+        self.api = api
+        self._build()
+        self.refresh()
+
+    def _build(self):
+        hdr = tk.Frame(self, bg=BG_MAIN)
+        hdr.pack(fill="x", padx=20, pady=(18,0))
+        tk.Label(hdr, text="Agent Status — Connected Endpoints",
+                 bg=BG_MAIN, fg=TEXT_PRI, font=FONT_H).pack(side="left")
+        _btn(hdr, "↻ Refresh", self.refresh, color=BG_ROW).pack(side="right")
+
+        tk.Label(self, text="Endpoints where the DataShield agent has been installed and is reporting in.",
+                 bg=BG_MAIN, fg=TEXT_MUT, font=FONT_SM).pack(anchor="w", padx=20)
+        tk.Frame(self, height=1, bg=BORDER).pack(fill="x", padx=20, pady=10)
+
+        # Column headers
+        cols = tk.Frame(self, bg=BG_CARD)
+        cols.pack(fill="x", padx=20)
+        for txt, w in [("Status",14),("Employee",24),("Hostname",20),("Platform",12),("Last Seen",14)]:
+            tk.Label(cols, text=txt, bg=BG_CARD, fg=TEXT_MUT,
+                     font=("Segoe UI",8,"bold"), width=w, anchor="w").pack(side="left", padx=6, pady=8)
 
         sf = ScrollFrame(self, bg=BG_MAIN)
         sf.pack(fill="both", expand=True, padx=20)
@@ -536,137 +743,55 @@ class PoliciesTab(tk.Frame):
 
     def refresh(self):
         def _load():
-            data = self.api.get("/api/policies")
+            data = self.api.get("/api/agents")
             self.after(0, lambda: self._render(data if isinstance(data, list) else []))
         threading.Thread(target=_load, daemon=True).start()
 
-    def _render(self, policies: list):
+    def _render(self, agents: list):
         for w in self._rows.winfo_children():
             w.destroy()
-        for p in policies:
-            row = tk.Frame(self._rows, bg=BG_ROW,
+
+        if not agents:
+            tk.Label(self._rows, text="No agents registered yet.\nEnroll employees and ask them to run python main.py on their machine.",
+                     bg=BG_MAIN, fg=TEXT_MUT, font=FONT, justify="center").pack(pady=32)
+            return
+
+        from datetime import datetime, timezone, timedelta
+        now = datetime.now(timezone.utc)
+
+        for i, a in enumerate(agents):
+            row_bg = BG_ROW if i % 2 == 0 else BG_ROW2
+            row = tk.Frame(self._rows, bg=row_bg,
                            highlightbackground=BORDER, highlightthickness=1)
-            row.pack(fill="x", pady=3, ipady=8)
-            tk.Label(row, text=f"  {p.get('name', '')}",
-                     bg=BG_ROW, fg=TEXT_PRI, font=FONT_BOLD,
-                     width=28, anchor="w").pack(side="left")
-            tk.Label(row, text=p.get("category", ""),
-                     bg=BG_ROW, fg=TEXT_MUT, font=FONT_SM,
-                     width=14, anchor="w").pack(side="left")
-            tk.Label(row, text=p.get("pattern", ""),
-                     bg=BG_ROW, fg=ACCENT, font=FONT_MONO,
-                     anchor="w").pack(side="left", padx=8)
+            row.pack(fill="x", pady=2, ipady=8)
 
-    def _push_all(self):
-        if not messagebox.askyesno("Push Policies",
-                                   "Push current policies to ALL registered agents?\n"
-                                   "Agents will fetch updates on next heartbeat.",
-                                   parent=self):
-            return
-        result = self.api.post("/api/policies/push", {})
-        if "_error" in result:
-            messagebox.showerror("Error", result["_error"], parent=self)
-        else:
-            self._status_var.set("✓ Policies pushed — agents will update on next heartbeat.")
+            # Online/offline
+            hb = a.get("last_heartbeat","")
+            is_online = False
+            hb_str = "Never"
+            if hb:
+                try:
+                    dt = datetime.fromisoformat(hb.replace("Z","+00:00"))
+                    diff = now - dt
+                    is_online = diff < timedelta(minutes=5)
+                    mins = int(diff.total_seconds()//60)
+                    hb_str = f"{mins}m ago" if mins < 60 else f"{mins//60}h {mins%60}m ago"
+                except: pass
 
+            status_color = OK if is_online else DANGER
+            status_text  = "● ONLINE" if is_online else "● OFFLINE"
+            tk.Label(row, text=status_text, bg=row_bg, fg=status_color,
+                     font=FONT_BOLD, width=14, anchor="w").pack(side="left", padx=6)
 
-class SettingsTab(tk.Frame):
-    def __init__(self, parent, api: APIClient, server_url: str):
-        super().__init__(parent, bg=BG_MAIN)
-        self.api        = api
-        self.server_url = server_url
-        self._build()
-        self.refresh()
-
-    def _build(self):
-        tk.Label(self, text="Settings & Encryption", bg=BG_MAIN, fg=TEXT_PRI,
-                 font=FONT_H).pack(anchor="w", padx=20, pady=(18, 4))
-        tk.Frame(self, height=1, bg=BORDER).pack(fill="x", padx=20, pady=(0, 12))
-
-        # Server info
-        _section(self, "Server")
-        info = _card(self, fill="x", padx=20, pady=(0, 4))
-        info.configure(padx=16, pady=10)
-        row = tk.Frame(info, bg=BG_CARD)
-        row.pack(fill="x")
-        tk.Label(row, text="Server URL:", bg=BG_CARD, fg=TEXT_MUT,
-                 font=FONT_SM, width=16, anchor="w").pack(side="left")
-        tk.Label(row, text=self.server_url, bg=BG_CARD, fg=TEXT_PRI,
-                 font=FONT_MONO).pack(side="left")
-
-        # Encryption section
-        _section(self, "Encryption Key Management")
-        enc = _card(self, fill="x", padx=20, pady=(0, 4))
-        enc.configure(padx=16, pady=14)
-
-        self._key_age_var    = tk.StringVar(value="Loading…")
-        self._dek_total_var  = tk.StringVar(value="Loading…")
-        self._rotation_var   = tk.StringVar(value="Loading…")
-        self._enc_status_var = tk.StringVar(value="")
-
-        for label, var in [
-            ("Master Key Age (days):", self._key_age_var),
-            ("Total Employees (DEKs):", self._dek_total_var),
-            ("Rotation Needed:",        self._rotation_var),
-        ]:
-            r = tk.Frame(enc, bg=BG_CARD)
-            r.pack(fill="x", pady=3)
-            tk.Label(r, text=label, bg=BG_CARD, fg=TEXT_MUT,
-                     font=FONT_SM, width=24, anchor="w").pack(side="left")
-            tk.Label(r, textvariable=var, bg=BG_CARD, fg=TEXT_PRI,
-                     font=FONT_BOLD, anchor="w").pack(side="left")
-
-        btn_r = tk.Frame(enc, bg=BG_CARD)
-        btn_r.pack(fill="x", pady=(12, 0))
-        _btn(btn_r, "↻ Refresh Status", self.refresh,
-             color=BG_ROW).pack(side="left", ipadx=6, ipady=4)
-        _btn(btn_r, "🔑 Rotate All Keys", self._rotate,
-             color="#3a1e1e", fg=DANGER).pack(side="left", padx=8, ipadx=6, ipady=4)
-
-        tk.Label(enc, textvariable=self._enc_status_var, bg=BG_CARD,
-                 fg=OK, font=FONT_SM).pack(anchor="w", pady=(8, 0))
-
-    def refresh(self):
-        def _load():
-            data = self.api.get("/api/encryption/status")
-            self.after(0, lambda: self._apply(data))
-        threading.Thread(target=_load, daemon=True).start()
-
-    def _apply(self, data: dict):
-        if "_error" in data:
-            self._key_age_var.set("Error")
-            self._dek_total_var.set("Error")
-            self._rotation_var.set("Error")
-            return
-        age      = data.get("master_key_age_days", 0)
-        total    = data.get("total_employees", 0)
-        needed   = data.get("dek_rotation_needed", False)
-        self._key_age_var.set(f"{age} days" if age < 999 else "Never rotated")
-        self._dek_total_var.set(str(total))
-        self._rotation_var.set("⚠ YES — rotate soon" if needed else "✓ Not required")
-
-    def _rotate(self):
-        if not messagebox.askyesno(
-            "Rotate Keys",
-            "This will rotate ALL employee encryption keys.\n"
-            "All existing events will be re-encrypted with new keys.\n\n"
-            "This may take a moment. Proceed?",
-            parent=self
-        ):
-            return
-        self._enc_status_var.set("Rotating keys… please wait.")
-        self.update()
-        def _do():
-            result = self.api.post("/api/encryption/rotate", {})
-            def _done():
-                if "_error" in result:
-                    self._enc_status_var.set(f"Error: {result['_error']}")
-                else:
-                    n = result.get("employees_rotated", 0)
-                    self._enc_status_var.set(f"✓ Rotated {n} employee key(s) successfully.")
-                    self.refresh()
-            self.after(0, _done)
-        threading.Thread(target=_do, daemon=True).start()
+            emp_name = a.get("employee_name") or a.get("employee_email","—")
+            tk.Label(row, text=emp_name, bg=row_bg, fg=TEXT_PRI,
+                     font=FONT, width=24, anchor="w").pack(side="left", padx=4)
+            tk.Label(row, text=a.get("hostname","—"), bg=row_bg, fg=TEXT_SEC,
+                     font=FONT_MONO, width=20, anchor="w").pack(side="left", padx=4)
+            tk.Label(row, text=a.get("platform","—"), bg=row_bg, fg=TEXT_MUT,
+                     font=FONT_SM, width=12, anchor="w").pack(side="left", padx=4)
+            tk.Label(row, text=hb_str, bg=row_bg, fg=TEXT_MUT,
+                     font=FONT_SM, width=14, anchor="w").pack(side="left", padx=4)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -674,50 +799,54 @@ class SettingsTab(tk.Frame):
 # ─────────────────────────────────────────────────────────────────────────────
 class AdminConsole(tk.Tk):
     """
-    The DataShield desktop management console for administrators.
-    Tabs: Overview | Employees | Alerts | Policies | Settings
+    DataShield Desktop Management Console — for IT Admins & Helpdesk.
+
+    Purpose: local employee enrollment and agent management.
+    For full monitoring/analytics/reports → use the Web Dashboard.
     """
-    def __init__(self, admin_name: str, admin_email: str,
-                 server_url: str, token: str):
+    def __init__(self, admin_name, admin_email, server_url, token):
         super().__init__()
         self.admin_name  = admin_name
         self.admin_email = admin_email
         self.server_url  = server_url
         self.api         = APIClient(server_url, token)
 
-        self.title(f"DataShield Management Console  —  {admin_name}")
+        self.title(f"DataShield IT Console  —  {admin_name}")
         self.geometry("1060x700")
         self.minsize(880, 580)
         self.configure(bg=BG_MAIN)
 
         self._build_header()
         self._build_tabs()
-        self.protocol("WM_DELETE_WINDOW", self._on_close)
+        self.protocol("WM_DELETE_WINDOW", self.destroy)
 
     def _build_header(self):
         hdr = tk.Frame(self, bg="#060a13", height=52)
         hdr.pack(fill="x")
         hdr.pack_propagate(False)
 
-        # Logo + title
         tk.Label(hdr, text="  🛡 DataShield", bg="#060a13", fg=ACCENT,
-                 font=("Segoe UI", 14, "bold")).pack(side="left", padx=4)
-        tk.Label(hdr, text="Management Console", bg="#060a13", fg=TEXT_MUT,
-                 font=("Segoe UI", 10)).pack(side="left")
+                 font=("Segoe UI",14,"bold")).pack(side="left", padx=4)
+        tk.Label(hdr, text="IT Helpdesk Console", bg="#060a13", fg=TEXT_MUT,
+                 font=("Segoe UI",10)).pack(side="left")
 
-        # Right: user chip
+        # Right side: user info + web dashboard link
         right = tk.Frame(hdr, bg="#060a13")
         right.pack(side="right", padx=16)
-        avatar_txt = (admin_name := self.admin_name)[0].upper() if self.admin_name else "A"
-        av = tk.Label(right, text=avatar_txt, bg=ACCENT, fg="white",
-                      font=("Segoe UI", 10, "bold"), width=2)
-        av.pack(side="left", padx=(0, 6))
+
+        _btn(right, "🌐 Open Web Dashboard",
+             lambda: __import__('webbrowser').open('http://localhost:5173'),
+             color="#1e293b", fg=TEXT_SEC).pack(side="right", ipadx=8, ipady=3)
+
+        av = tk.Label(right, text=self.admin_name[0].upper() if self.admin_name else "A",
+                      bg=ACCENT, fg="white", font=("Segoe UI",10,"bold"), width=2)
+        av.pack(side="left", padx=(0,6))
         info = tk.Frame(right, bg="#060a13")
-        info.pack(side="left")
+        info.pack(side="left", padx=(0,12))
         tk.Label(info, text=self.admin_name, bg="#060a13", fg=TEXT_PRI,
-                 font=("Segoe UI", 9, "bold")).pack(anchor="w")
-        tk.Label(info, text="Administrator", bg="#060a13", fg=TEXT_MUT,
-                 font=("Segoe UI", 8)).pack(anchor="w")
+                 font=("Segoe UI",9,"bold")).pack(anchor="w")
+        tk.Label(info, text="IT Administrator", bg="#060a13", fg=TEXT_MUT,
+                 font=("Segoe UI",8)).pack(anchor="w")
 
         tk.Frame(self, height=1, bg=BORDER).pack(fill="x")
 
@@ -727,24 +856,19 @@ class AdminConsole(tk.Tk):
 
         style = ttk.Style()
         style.theme_use("default")
-        style.configure("TNotebook",        background=BG_MAIN, borderwidth=0)
-        style.configure("TNotebook.Tab",    background=BG_CARD, foreground=TEXT_SEC,
-                        padding=[16, 8], font=("Segoe UI", 9))
+        style.configure("TNotebook",     background=BG_MAIN, borderwidth=0)
+        style.configure("TNotebook.Tab", background=BG_CARD, foreground=TEXT_SEC,
+                        padding=[16,8], font=("Segoe UI",9))
         style.map("TNotebook.Tab",
                   background=[("selected", BG_MAIN)],
                   foreground=[("selected", TEXT_PRI)])
 
-        self._overview  = OverviewTab(nb,  self.api)
-        self._employees = EmployeesTab(nb, self.api)
-        self._alerts    = AlertsTab(nb,    self.api)
-        self._policies  = PoliciesTab(nb,  self.api)
-        self._settings  = SettingsTab(nb,  self.api, self.server_url)
+        ov  = OverviewTab(nb, self.api)
+        emp = EmployeesTab(nb, self.api)
+        enr = EnrollmentWizardTab(nb, self.api)
+        agt = AgentStatusTab(nb, self.api)
 
-        nb.add(self._overview,  text="  Overview  ")
-        nb.add(self._employees, text="  Employees  ")
-        nb.add(self._alerts,    text="  Alerts  ")
-        nb.add(self._policies,  text="  Policies  ")
-        nb.add(self._settings,  text="  Settings  ")
-
-    def _on_close(self):
-        self.destroy()
+        nb.add(ov,  text="  Overview  ")
+        nb.add(emp, text="  Employees  ")
+        nb.add(enr, text="  ✚ Enroll New  ")
+        nb.add(agt, text="  Agent Status  ")
