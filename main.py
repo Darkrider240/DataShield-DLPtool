@@ -22,7 +22,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import scanner
-import behaviour
+import scanner_analysis as behaviour
 import classifier
 import ai_explain
 import quarantine

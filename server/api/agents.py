@@ -38,8 +38,7 @@ async def register_agent(body: AgentRegisterRequest, db: AsyncSession = Depends(
             full_name=body.employee_name or body.hostname,
             encrypted_dek=create_employee_dek(),
         )
-        db.add(employee)
-        await db.flush()
+    db.add(employee)
 
     # Create agent record
     agent = Agent(
@@ -51,7 +50,9 @@ async def register_agent(body: AgentRegisterRequest, db: AsyncSession = Depends(
         last_heartbeat=datetime.now(timezone.utc),
     )
     db.add(agent)
-    await db.flush()
+    # Commit now — flush alone risks losing the new records on crash
+    await db.commit()
+    await db.refresh(agent)
 
     # Fetch active policies
     pol_result = await db.execute(select(Policy).where(Policy.is_active == True))
@@ -98,7 +99,6 @@ async def get_policy(agent_id: str, db: AsyncSession = Depends(get_db)):
 @router.post("/events", status_code=200, dependencies=[Depends(_verify_agent_key)])
 async def ingest_events(
     body: list[EventIngest],
-    x_datashield_agent_key: str = Header(...),
     db: AsyncSession = Depends(get_db)
 ):
     for ev_data in body:

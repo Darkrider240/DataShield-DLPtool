@@ -1,6 +1,7 @@
 rules:
 - base_weight: 3.0
   category: PII
+  description: Indian Aadhaar Unique Identification Number
   name: AADHAAR
   pattern: (?<!\d)(?<!\d\s)(?<!\d-)\b\d{4}[-\s]?\d{4}[-\s]?\d{4}\b(?![-\s]?\d)
   regulation_tags:
@@ -8,6 +9,7 @@ rules:
   - GDPR Art.6
 - base_weight: 3.0
   category: PII
+  description: Indian Permanent Account Number (PAN)
   name: PAN
   pattern: \b[A-Z]{5}[0-9]{4}[A-Z]\b
   regulation_tags:
@@ -15,6 +17,7 @@ rules:
   - GDPR Art.6
 - base_weight: 3.0
   category: PII
+  description: US Social Security Number
   name: SSN
   pattern: \b\d{3}-\d{2}-\d{4}\b
   regulation_tags:
@@ -22,6 +25,7 @@ rules:
   - GDPR Art.6
 - base_weight: 3.5
   category: PII
+  description: Indian Passport Number
   name: PASSPORT
   pattern: \b[A-PR-WY][1-9]\d{7}\b
   regulation_tags:
@@ -29,48 +33,56 @@ rules:
   - DPDP Act 2023
 - base_weight: 2.5
   category: PII
+  description: Indian Voter ID Card Number
   name: VOTER_ID
   pattern: \b[A-Z]{3}[0-9]{7}\b
   regulation_tags:
   - DPDP Act 2023
 - base_weight: 1.0
   category: PII
+  description: Standard Email Address
   name: EMAIL
   pattern: \b[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}\b
   regulation_tags:
   - GDPR Art.6
 - base_weight: 1.5
   category: PII
+  description: Indian Mobile Phone Number
   name: PHONE_IN
   pattern: \b(?:\+91|0)?[6-9]\d{9}\b
   regulation_tags:
   - DPDP Act 2023
 - base_weight: 1.5
   category: PII
+  description: US Phone Number
   name: PHONE_US
   pattern: \b(?:\+1\s?)?\(?\d{3}\)?[\s.\-]\d{3}[\s.\-]\d{4}\b
   regulation_tags:
   - "HIPAA \xC2\xA7164.514"
 - base_weight: 4.0
   category: FINANCIAL
+  description: Credit Card Number (Luhn-checked)
   name: CREDIT_CARD
   pattern: \b(?:4(?:[0-9][-\s]?){12}(?:(?:[0-9][-\s]?){3})?|5[1-5](?:[0-9][-\s]?){14}|3[47](?:[0-9][-\s]?){13}|3(?:0[0-5]|[68][0-9])(?:[0-9][-\s]?){11}|6(?:011|5[0-9]{2})(?:[0-9][-\s]?){12})\b
   regulation_tags:
   - PCI-DSS Req.3.4
 - base_weight: 2.0
   category: FINANCIAL
+  description: Unified Payments Interface (UPI) ID
   name: UPI
   pattern: \b[a-zA-Z0-9.\-_]{2,256}@[a-zA-Z]{2,64}\b
   regulation_tags:
   - RBI Guidelines India
 - base_weight: 2.0
   category: FINANCIAL
+  description: Indian Financial System Code (IFSC)
   name: IFSC
   pattern: \b[A-Z]{4}0[A-Z0-9]{6}\b
   regulation_tags:
   - RBI Guidelines India
 - base_weight: 3.0
   category: FINANCIAL
+  description: International Bank Account Number (IBAN)
   name: IBAN
   pattern: \b[A-Z]{2}\d{2}[A-Z0-9]{4}\d{7}(?:[A-Z0-9]?){0,16}\b
   regulation_tags:
@@ -78,12 +90,14 @@ rules:
   - GDPR Art.6
 - base_weight: 5.0
   category: SECRETS
+  description: Generic API Key or Secret Parameter
   name: API_KEY_GENERIC
   pattern: (?i)(?:api[_\-]?key|api[_\-]?secret|access[_\-]?key)\s*[=:]\s*["']?([A-Za-z0-9_\-]{16,64})
   regulation_tags:
   - OWASP A02:2021
 - base_weight: 5.0
   category: SECRETS
+  description: AWS Access Key ID
   name: AWS_KEY
   pattern: \bAKIA[0-9A-Z]{16}\b
   regulation_tags:
@@ -91,24 +105,28 @@ rules:
   - CIS AWS Benchmark
 - base_weight: 4.5
   category: SECRETS
+  description: Bearer Authorization Token
   name: BEARER_TOKEN
   pattern: (?i)bearer\s+([A-Za-z0-9\-_\.]{20,})
   regulation_tags:
   - OWASP A02:2021
 - base_weight: 5.0
   category: SECRETS
+  description: PEM Private Key block
   name: PRIVATE_KEY
   pattern: '-----BEGIN (?:RSA |EC )?PRIVATE KEY-----'
   regulation_tags:
   - OWASP A02:2021
 - base_weight: 4.0
   category: SECRETS
+  description: Plain-text Password assignment
   name: PASSWORD_FIELD
   pattern: (?i)(?:password|passwd|pwd)\s*[=:]\s*["']?(\S{6,})
   regulation_tags:
   - OWASP A02:2021
 - base_weight: 4.0
   category: HEALTH
+  description: ICD-10 Medical Diagnosis Code
   name: ICD10_CODE
   pattern: \b[A-TV-Z][0-9][0-9A-Z]\.?[0-9A-Z]{0,4}\b
   regulation_tags:
@@ -116,6 +134,7 @@ rules:
   - GDPR Art.9
 - base_weight: 3.5
   category: HEALTH
+  description: Protected Health Information (PHI) Keywords
   name: PHI_KEYWORDS
   pattern: (?i)\b(?:diagnosis|prescription|medical\s+record|blood\s+type|HIV|diabetes|patient\s+id|insurance\s+number)\b
   regulation_tags:
@@ -123,6 +142,7 @@ rules:
   - GDPR Art.9
 - base_weight: 4.0
   category: HEALTH
+  description: Biometric Data Keywords
   name: BIOMETRIC_KEYWORDS
   pattern: (?i)\b(?:fingerprint|retina\s+scan|facial\s+recognition|iris\s+scan|biometric)\b
   regulation_tags:

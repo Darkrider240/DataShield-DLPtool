@@ -1,61 +1,57 @@
-# Node / Dashboard
-node_modules/
-dashboard/dist/
-dashboard/.env
-
-# Alembic generated versions (keep structure, ignore versions)
-server/alembic/versions/*.py
-
-# Byte-compiled / optimized / DLL files
+﻿# Python
 __pycache__/
 *.py[cod]
-*$py.class
-
-# C extensions
-*.so
-
-# Distribution / packaging
-build/
-develop-eggs/
-dist/
-downloads/
-eggs/
-.eggs/
-lib/
-lib64/
-parts/
-sdist/
-var/
-wheels/
-share/python-wheels/
+*.pyo
+*.pyd
+.Python
 *.egg-info/
-.installed.cfg
+dist/
+build/
 *.egg
 
-# Virtual Environment
+# Virtual environments
 venv/
 .venv/
-ENV/
 env/
+.env_backup
 
-# DataShield Local Logs & Reports
+# DataShield scan outputs (never commit scan reports)
 output/
-datashield_audit.log
-report.html
-report.csv
-temp_clone/
-
-# Sensitive Environment Variables
-.env
-
-# Editor Configurations
-.vscode/
-.idea/
-*.suo
-*.ntvs*
-*.njsproj
-*.sln
-*.swp
-
-datashield_agent_audit.log
+reports/
 *.log
+datashield_audit.log
+datashield_agent_audit.log
+quarantine/
+
+# Secrets — NEVER commit these
+.env
+server/.env
+*.pem
+*.key
+*.p12
+
+# Alembic
+server/alembic/versions/__pycache__/
+
+# IDE / OS
+.idea/
+.vscode/
+*.swp
+*.swo
+.DS_Store
+Thumbs.db
+
+# Dashboard / Node
+dashboard/node_modules/
+dashboard/dist/
+dashboard/.env
+dashboard/.env.local
+
+# Pytest
+.pytest_cache/
+htmlcov/
+.coverage
+
+# mypy / pyright
+.mypy_cache/
+pyrightconfig.json

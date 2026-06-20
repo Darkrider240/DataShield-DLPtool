@@ -7,7 +7,7 @@ from pathlib import Path
 
 # Import DataShield core components
 import scanner
-import behaviour
+import scanner_analysis as behaviour
 import classifier
 import ai_explain
 import quarantine
