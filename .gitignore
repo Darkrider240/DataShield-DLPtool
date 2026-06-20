@@ -56,3 +56,6 @@ temp_clone/
 *.njsproj
 *.sln
 *.swp
+
+datashield_agent_audit.log
+*.log
