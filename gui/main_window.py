@@ -14,45 +14,75 @@ from gui.comms_tab import CommsTab
 
 class MainWindow(tk.Tk):
     """
-    MainWindow serves as the container for the Tkinter desktop GUI app.
-    Initializes shared state, defines the visual styling (dark mode),
-    and arranges the ttk.Notebook tabs.
+    MainWindow — role-aware Tkinter GUI.
+    role='admin'    → all tabs visible
+    role='employee' → only Scan + Detections (monitors run in background via main.py)
     """
-    def __init__(self):
+    def __init__(self, role: str = "employee", user_name: str = "", user_email: str = ""):
         super().__init__()
-        
-        self.title("DataShield v2 — Python DLP Scanner & Classifier")
-        self.geometry("850x650")
-        self.minsize(800, 600)
-        
-        # Initialize paths
-        self.base_dir = Path(__file__).resolve().parent.parent
-        self.allowlist_path = self.base_dir / "rules" / "allowlist.yaml"
+        self.role       = role
+        self.user_name  = user_name
+        self.user_email = user_email
+        is_admin        = (role == "admin")
+
+        title_suffix = f"  |  {user_name or user_email}  [{role.upper()}]"
+        self.title(f"DataShield{title_suffix}")
+        self.geometry("920x680")
+        self.minsize(820, 600)
+
+        self.base_dir           = Path(__file__).resolve().parent.parent
+        self.allowlist_path     = self.base_dir / "rules" / "allowlist.yaml"
         self.default_rules_path = self.base_dir / "rules" / "default_rules.yaml"
-        self.audit_log_path = self.base_dir / "output" / "datashield_audit.log"
-        
-        # Initialize Shared App State
+        self.audit_log_path     = self.base_dir / "output" / "datashield_agent_audit.log"
+
         self.state = {
-            "scan_directory": "",
-            "scan_results": [],
-            "audit_logger": AuditLogger(str(self.audit_log_path)),
-            "policy_manager": PolicyManager(
-                rules_path=str(self.default_rules_path), 
+            "scan_directory":   "",
+            "scan_results":     [],
+            "audit_logger":     AuditLogger(str(self.audit_log_path)),
+            "policy_manager":   PolicyManager(
+                rules_path=str(self.default_rules_path),
                 allowlist_path=str(self.allowlist_path)
             ),
-            "gemini_api_key": os.environ.get("GEMINI_API_KEY", ""),
-            "allowlist_path": str(self.allowlist_path),
+            "gemini_api_key":   os.environ.get("GEMINI_API_KEY", ""),
+            "allowlist_path":   str(self.allowlist_path),
             "custom_rules_path": "",
-            "smtp_config": {},
-            "is_scanning": False,
-            "root_window": self
+            "smtp_config":      {},
+            "is_scanning":      False,
+            "root_window":      self,
+            "role":             role,
+            "user_email":       user_email,
         }
-        
-        self.configure_styles()
-        self.create_layout()
 
-        # Monitor deactivation hook on close
+        self.configure_styles()
+        self._build_header(is_admin)
+        self.create_layout(is_admin)
         self.protocol("WM_DELETE_WINDOW", self.on_close)
+
+    def _build_header(self, is_admin: bool):
+        """Slim status bar showing logged-in user and role badge."""
+        bar = tk.Frame(self, bg="#0f172a", height=36)
+        bar.pack(fill="x", side="top")
+        bar.pack_propagate(False)
+
+        badge_color = "#6366f1" if is_admin else "#0ea5e9"
+        badge_text  = "ADMIN" if is_admin else "EMPLOYEE"
+
+        tk.Label(bar, text="DataShield Enterprise", bg="#0f172a",
+                 fg="#6366f1", font=("Segoe UI", 11, "bold")).pack(side="left", padx=14)
+        tk.Label(bar, text=f"  {badge_text}  ", bg=badge_color, fg="white",
+                 font=("Segoe UI", 8, "bold")).pack(side="left", pady=8)
+        name_lbl = self.user_name or self.user_email
+        tk.Label(bar, text=name_lbl, bg="#0f172a",
+                 fg="#94a3b8", font=("Segoe UI", 9)).pack(side="left", padx=10)
+
+        if not is_admin:
+            tk.Label(bar,
+                     text="USB, Clipboard & SMTP monitors running automatically in background",
+                     bg="#0f172a", fg="#475569", font=("Segoe UI", 8)).pack(side="right", padx=14)
+
+        tk.Frame(self, height=1, bg="#1e293b").pack(fill="x")
+
+
 
     def configure_styles(self):
         # Apply Clam theme as a baseline for styling
@@ -95,27 +125,28 @@ class MainWindow(tk.Tk):
         self.style.configure("TLabelframe", background=self.bg_dark, bordercolor=self.bg_card, padding=10)
         self.style.configure("TLabelframe.Label", background=self.bg_dark, foreground=self.color_blue, font=("Segoe UI", 10, "bold"))
 
-    def create_layout(self):
-        # Tab notebook container
+    def create_layout(self, is_admin: bool = True):
         self.notebook = ttk.Notebook(self)
         self.notebook.pack(fill="both", expand=True, padx=5, pady=5)
 
-        # Instantiate Tabs
-        self.scan_tab = ScanTab(self.notebook, self.state)
+        self.scan_tab    = ScanTab(self.notebook, self.state)
         self.results_tab = ResultsTab(self.notebook, self.state)
-        self.report_tab = ReportTab(self.notebook, self.state)
-        self.comms_tab = CommsTab(self.notebook, self.state)
-        self.settings_tab = self.create_settings_tab()
 
-        # Add tabs to notebook
-        self.notebook.add(self.scan_tab, text="  Full Scan & Monitor  ")
-        self.notebook.add(self.results_tab, text="  Threat Detections  ")
-        self.notebook.add(self.comms_tab, text="  Comms DLP  ")
-        self.notebook.add(self.report_tab, text="  Reports & Auditing  ")
-        self.notebook.add(self.settings_tab, text="  Configuration Rules  ")
+        # All users get Scan + Detections
+        self.notebook.add(self.scan_tab,    text="  Scan Files  ")
+        self.notebook.add(self.results_tab, text="  Detections  ")
 
-        # Track tab changes
+        # Admin-only tabs
+        if is_admin:
+            self.comms_tab    = CommsTab(self.notebook, self.state)
+            self.report_tab   = ReportTab(self.notebook, self.state)
+            self.settings_tab = self.create_settings_tab()
+            self.notebook.add(self.comms_tab,    text="  Comms DLP  ")
+            self.notebook.add(self.report_tab,   text="  Reports  ")
+            self.notebook.add(self.settings_tab, text="  Configuration  ")
+
         self.notebook.bind("<<NotebookTabChanged>>", self.on_tab_changed)
+
 
     def toggle_comms_daemons(self):
         """Starts/stops background monitor daemons depending on Settings variables."""
@@ -210,13 +241,17 @@ class MainWindow(tk.Tk):
         self.state["enable_clipboard_monitor"] = False
         self.state["enable_usb_monitor"] = False
         self.state["enable_webmail_monitor"] = False
-        self.toggle_comms_daemons()
+        if hasattr(self, "comms_tab"):
+            self.toggle_comms_daemons()
         self.destroy()
 
     def on_tab_changed(self, event):
-        selected_index = self.notebook.index("current")
-        if selected_index == 3:  # Report Tab index (shifted by 1 due to Comms tab)
-            self.report_tab.update_report_stats()
+        if hasattr(self, "report_tab"):
+            selected_index = self.notebook.index("current")
+            report_index = self.notebook.index(self.report_tab)
+            if selected_index == report_index:
+                self.report_tab.update_report_stats()
+
 
     def create_settings_tab(self) -> ttk.Frame:
         """Builds settings panel for API key, allowlist, SMTP, and custom rules."""

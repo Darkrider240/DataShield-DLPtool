@@ -1,3 +1,11 @@
+# Node / Dashboard
+node_modules/
+dashboard/dist/
+dashboard/.env
+
+# Alembic generated versions (keep structure, ignore versions)
+server/alembic/versions/*.py
+
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[cod]
@@ -48,3 +56,6 @@ temp_clone/
 *.njsproj
 *.sln
 *.swp
+
+datashield_agent_audit.log
+*.log
