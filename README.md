@@ -3,8 +3,6 @@
 > **Enterprise-grade Data Loss Prevention** — multi-component, AI-powered, encryption-first.  
 > Built as an internship project demonstrating real-world DLP architecture.
 
-![Architecture](docs/architecture.png)
-
 ---
 
 ## What It Does
@@ -14,7 +12,7 @@ DataShield monitors and prevents sensitive data from leaving your organisation a
 | Channel | How it's monitored |
 |---|---|
 | 📂 **Files** | Scan before sending — employee picks folder, agent scans with 40+ DLP patterns |
-| 📧 **Webmail** | Browser extension intercepts Gmail / Outlook compose before Send fires |
+| 📧 **Webmail** | Browser extension intercepts Gmail attachment upload before it ever reaches Gmail |
 | 📋 **Clipboard** | Background monitor flags paste of sensitive content |
 | 💾 **USB** | Detects insertion, scans files copied to removable drives |
 
@@ -36,86 +34,133 @@ Every violation is:
 │      ↓                                                              │
 │  EmployeeHomeWindow (Tkinter)                                       │
 │    ├── Monitor pills (Clipboard · USB · Webmail)                    │
-│    ├── Scan Folder button → results + Gemini AI explanation        │
-│    └── Live Threat Feed (click any row for AI explanation)         │
+│    ├── Scan Folder button → results + Gemini AI explanation         │
+│    └── Live Threat Feed (click any row for AI explanation)          │
 │                                                                     │
 │  Background threads:                                                │
-│    ClipboardMonitor · USBWatcher · WebmailHTTPServer (:5000)       │
+│    ClipboardMonitor · USBWatcher · WebmailHTTPServer (:5000)        │
 │                                                                     │
-│  Browser Extension (Chrome/Edge MV3)                               │
-│    └── Intercepts Gmail/Outlook Send → POST /scan → BLOCK/WARN    │
+│  Chrome Extension (MV3)  — extension/                               │
+│    ├── content.js     Intercepts Gmail file input (capture phase)   │
+│    │                  Blocks/warns on DLP match                     │
+│    │                  Whitelists admin-approved files               │
+│    └── background.js  Service worker — CORS-free HTTP proxy         │
+│                        Polls server for override approval decisions  │
 └────────────────┬────────────────────────────────────────────────────┘
+                 │ HTTP :5000 (agent proxy)
                  │ POST /api/agents/events  (JWT auth)
                  │ WebSocket /ws/events     (live feed)
                  ▼
 ┌─────────────────────────────────────────────────────────────────────┐
-│  FASTAPI SERVER  (:8000)                                            │
+│  FASTAPI SERVER  (:8001)                                            │
 │                                                                     │
 │  API Routes:                                                        │
-│    /api/auth        Login (admin → dashboard, employee → agent)    │
-│    /api/agents      Register · Heartbeat · Event ingest            │
+│    /api/auth        Login (admin → dashboard, employee → agent)     │
+│    /api/agents      Register · Heartbeat · Event ingest             │
 │    /api/events      List with employee attribution + email details  │
-│    /api/employees   Profiles · Timeline · Flag/Unflag              │
-│    /api/alerts      Acknowledge · Escalate                         │
-│    /api/policies    YAML import · Push to agents                   │
-│    /api/reports     Compliance metrics · Gemini executive summary  │
+│    /api/employees   Profiles · Timeline · Flag/Unflag · Set PIN     │
+│    /api/alerts      Acknowledge · Escalate                          │
+│    /api/policies    YAML import · Push to agents                    │
+│    /api/overrides   Submit · Review · Approve/Deny · Notifications  │
+│    /api/reports     Compliance metrics · Gemini executive summary   │
+│    /api/encryption  Key status · Rotate all DEKs                   │
 │    /ws/events       Live WebSocket broadcast                        │
 │                                                                     │
 │  Services:                                                          │
-│    alert_engine.py  — severity scoring, deduplication, SMTP        │
-│    behaviour.py     — risk score: base × volume × time × repeat    │
-│    crypto_service.py — AES-256-GCM per-employee DEK management    │
+│    alert_engine.py   — severity scoring, deduplication, SMTP        │
+│    behaviour.py      — risk score: base × volume × time × repeat   │
+│    crypto_service.py — AES-256-GCM per-employee DEK management     │
 └────────────────┬────────────────────────────────────────────────────┘
-                 │
+                 │ asyncpg
                  ▼
 ┌─────────────────────────────────────────────────────────────────────┐
 │  INFRASTRUCTURE                                                     │
 │                                                                     │
-│  PostgreSQL                                                         │
-│    dlp_events  (employee_id, channel, risk_level,                  │
-│                 sender_email, recipient_emails, email_subject,      │
-│                 file_path_encrypted, matched_value_redacted)        │
-│    employees   (risk_score, is_flagged, encrypted_dek)             │
-│    agents      (heartbeat, policy_version)                         │
-│    alerts      (severity, escalation_count)                        │
-│    policies    (yaml_content, version)                             │
+│  PostgreSQL  (Docker :5432)                                         │
+│    dlp_events        (channel, risk_level, file_path_encrypted,     │
+│                       sender_email, recipient_emails)               │
+│    employees         (risk_score, is_flagged, encrypted_dek,        │
+│                       pin_hash, pin_set)                            │
+│    agents            (heartbeat, policy_version)                    │
+│    alerts            (severity, escalation_count)                   │
+│    policies          (yaml_content, version)                        │
+│    override_requests (status, justification, agent_notified)        │
 │                                                                     │
-│  Gemini AI  — Inline employee explanations + dashboard reports     │
+│  Gemini AI  — Inline employee explanations + dashboard reports      │
 └─────────────────────────────────────────────────────────────────────┘
+```
+
+---
+
+## Override Request Flow
+
+When Gmail DLP blocks an attachment, the employee can request admin approval:
+
+```
+Employee attaches file → DLP scan → BLOCKED
+         ↓
+Employee types justification → "Request Override"
+         ↓
+background.js POSTs to :5000 proxy → :8001/api/overrides
+         ↓ (polls every 8 seconds)
+Admin reviews in dashboard → Approves / Denies
+         ↓
+background.js gets decision → sends to Gmail tab
+         ↓
+APPROVED → file whitelisted for 15 min → employee reattaches → sent ✅
+DENIED   → red toast shown with admin note
 ```
 
 ---
 
 ## Quick Start
 
-### 1. Server
+### Prerequisites
+
 ```bash
-cd server
-pip install -r requirements.txt
-cp .env.example .env        # fill in DB, JWT secret, Gemini key
-python init_db.py           # seeds admin@datashield.local
-uvicorn main:app --reload
+# 1. Start PostgreSQL via Docker
+docker-compose up -d
+
+# 2. Create the virtual environment
+python -m venv venv
+venv\Scripts\activate        # Windows
+source venv/bin/activate     # Mac/Linux
+pip install -r server/requirements.txt
 ```
 
-### 2. Dashboard (Admin)
+### 1. Server (FastAPI)
+
+```bash
+cd server
+cp .env.example .env         # fill in DB_URL, JWT_SECRET, GEMINI_API_KEY
+python init_db.py            # seeds admin@datashield.local / Admin@123
+uvicorn main:app --host 0.0.0.0 --port 8001 --reload
+```
+
+### 2. Admin Dashboard (React)
+
 ```bash
 cd dashboard
 npm install
-npm run dev                 # opens http://localhost:5173
+npm run dev                  # opens http://localhost:5173
 ```
+
 Login: `admin@datashield.local` / `Admin@123`
 
-### 3. Employee Agent
+### 3. Employee Agent (Tkinter)
+
 ```bash
-pip install -r requirements.txt
-cp .env.example .env        # fill in SERVER_URL, GEMINI_API_KEY
-python main.py              # login dialog appears
+# From project root (with venv active)
+cp .env.example .env         # set SERVER_URL=http://localhost:8001
+python main.py               # login dialog appears
 ```
 
-### 4. Browser Extension
-- Open `chrome://extensions` → Enable Developer mode
-- Click **Load unpacked** → select `browser_extension/` folder
-- Extension activates on Gmail and Outlook Web
+### 4. Browser Extension (Chrome MV3)
+
+1. Open `chrome://extensions` → Enable **Developer mode**
+2. Click **Load unpacked** → select the `extension/` folder
+3. Extension activates automatically on Gmail
+4. Hard-refresh Gmail after any extension reload (`Ctrl+Shift+R`)
 
 ---
 
@@ -123,11 +168,14 @@ python main.py              # login dialog appears
 
 | Decision | Rationale |
 |---|---|
+| **Background service worker for HTTP** | Content scripts are CORS-restricted; background workers bypass CORS for host_permissions URLs entirely |
+| **Capture-phase event interception** | `addEventListener('change', fn, { capture: true })` fires before Gmail's own handler — only reliable way to block files before Gmail processes them |
 | **Per-employee DEK** | If one key leaks, only that employee's events are exposed |
-| **Alert deduplication** | Same pattern within 4h increments `escalation_count` instead of flooding |
-| **Risk multipliers** | Off-hours events (22:00–06:00) × 1.3, high-volume × 1.5, repeat pattern × 1.4 |
-| **Browser extension MV3** | Future-proof (MV2 deprecated by Chrome), service-worker based |
-| **Tkinter not Electron** | No Node.js dependency, single `python main.py` command, no build step |
+| **Alert deduplication** | Same pattern within 4h increments `escalation_count` instead of flooding alerts |
+| **Risk multipliers** | Off-hours (22:00–06:00) ×1.3, high-volume ×1.5, repeat pattern ×1.4 |
+| **Envelope encryption** | Master key (derived, never stored) encrypts per-employee DEKs; DEKs encrypt event data |
+| **Tkinter not Electron** | No Node.js dependency on employee machines — single `python main.py` |
+| **Fail-open DLP** | If agent is offline, attachments are warned but not blocked — availability over security for usability |
 
 ---
 
@@ -135,21 +183,93 @@ python main.py              # login dialog appears
 
 | Role | Access |
 |---|---|
-| `superadmin` | Full access: policies, encryption key rotation, all events (decrypted) |
+| `superadmin` | Full access: policies, encryption key rotation, all events (decrypted), override decisions |
 | `analyst` | Events (decrypted), employees, alerts — no policy changes |
 | `viewer` | Read-only dashboard metrics |
-| `employee` | Agent only — sees own threats, can scan folders |
+| `employee` | Agent only — sees own threats, can scan folders, submit override requests |
 
 ---
 
-## Files Changed in `enterp` Branch
+## Environment Variables
 
-| File | What changed |
-|---|---|
-| `gui/main_window.py` | Replaced tabbed window with focused EmployeeHomeWindow — scan button, live threat feed, AI explanation on click, logout, connection status |
-| `comms/http_server.py` | Fixed import bug; captures sender/recipient for webmail events |
-| `browser_extension/` | New — MV3 Chrome/Edge extension for Gmail/Outlook interception |
-| `server/api/events.py` | Events now return employee_name, email, dept; email sender/recipient |
-| `server/models/event.py` | Added sender_email, recipient_emails, email_subject columns |
-| `dashboard/src/pages/Events.tsx` | Expandable rows showing employee + email attribution |
-| `main.py` | Unified login, logout callback, server ping, monitor feed wiring |
+### `server/.env`
+
+```env
+DATABASE_URL=postgresql+asyncpg://datashield:datashield@localhost:5432/datashield
+JWT_SECRET=your-secret-here
+JWT_ALGORITHM=HS256
+GEMINI_API_KEY=your-gemini-key
+MASTER_KEY_PASSPHRASE=your-passphrase
+SMTP_HOST=smtp.gmail.com
+SMTP_PORT=587
+SMTP_USER=alerts@yourcompany.com
+SMTP_PASS=your-app-password
+```
+
+### `.env` (agent root)
+
+```env
+SERVER_URL=http://localhost:8001
+GEMINI_API_KEY=your-gemini-key
+AGENT_SECRET=your-agent-secret
+```
+
+---
+
+## Project Structure
+
+```
+datashield/
+├── main.py                  # Agent entry point (login + monitor orchestration)
+├── gui/
+│   ├── main_window.py       # EmployeeHomeWindow (Tkinter)
+│   └── local_history.py     # Local event history viewer
+├── comms/
+│   └── http_server.py       # Agent HTTP server (:5000) — scan + proxy
+├── extension/               # Chrome MV3 browser extension
+│   ├── manifest.json
+│   ├── content.js           # Gmail DLP interceptor
+│   └── background.js        # Service worker (CORS-free HTTP + approval polling)
+├── server/                  # FastAPI backend
+│   ├── main.py
+│   ├── config.py
+│   ├── database.py
+│   ├── models/              # SQLAlchemy models
+│   ├── schemas/             # Pydantic schemas
+│   ├── api/                 # Route handlers
+│   │   ├── auth.py
+│   │   ├── agents.py
+│   │   ├── employees.py
+│   │   ├── events.py
+│   │   ├── overrides.py     # Override request + approval flow
+│   │   ├── alerts.py
+│   │   ├── policies.py
+│   │   ├── reports.py
+│   │   └── encryption.py
+│   └── services/
+│       ├── alert_engine.py
+│       ├── behaviour.py
+│       └── crypto_service.py
+├── crypto/
+│   └── encryption.py        # AES-256-GCM + PBKDF2 key derivation
+├── dashboard/               # React + TypeScript admin dashboard
+│   └── src/
+│       ├── pages/           # Dashboard, Employees, Events, Alerts, Overrides...
+│       ├── components/      # Navbar, LiveFeed, RiskBadge, Charts...
+│       └── api/             # Axios clients for each endpoint
+└── docker-compose.yml       # PostgreSQL container
+```
+
+---
+
+## Networking Overview
+
+| Port | Service | Used by |
+|---|---|---|
+| `:5000` | Agent HTTP server | Browser extension (scan, ping, me, override proxy) |
+| `:8001` | FastAPI server | Agent (event ingest), Dashboard (all API), Extension background worker |
+| `:5432` | PostgreSQL (Docker) | FastAPI via asyncpg |
+| `:5173` | Vite dev server | Admin dashboard in browser |
+
+**CORS**: FastAPI allows `chrome-extension://` origins via `allow_origin_regex`.  
+**Extension HTTP**: All fetch calls from content scripts go through `background.js` (service worker) to avoid CORS preflight restrictions.
