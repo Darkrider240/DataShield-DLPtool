@@ -11,7 +11,9 @@ from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from server.database import create_all_tables, AsyncSessionFactory
 from server.config import get_settings
 from server.api import auth, agents, employees, events, policies, alerts, reports, encryption
+from server.api.overrides import router as overrides_router
 from server.api.websocket import router as ws_router
+from server.models import override as _override_model  # noqa: F401 — registers model for create_all
 from server.services.behaviour import detect_anomalies
 
 settings = get_settings()
@@ -99,10 +101,16 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
-# CORS — allow the dashboard (Vite dev :5173 and prod :80) and extension origins
+# CORS — allow the dashboard (Vite dev :5173 and prod :80) and browser extension origins
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:5173", "http://localhost:80", "http://localhost:3000"],
+    allow_origins=[
+        "http://localhost:5173",
+        "http://localhost:3000",
+        "http://localhost:80",
+        "http://localhost:8001",
+    ],
+    allow_origin_regex=r"chrome-extension://.*",   # browser extension requests
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -118,6 +126,7 @@ app.include_router(policies.router)
 app.include_router(alerts.router)
 app.include_router(reports.router)
 app.include_router(encryption.router)
+app.include_router(overrides_router)
 
 
 @app.get("/api/health")

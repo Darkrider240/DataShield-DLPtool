@@ -119,10 +119,12 @@ async def validate_employee(
                 raise HTTPException(status_code=401, detail="Wrong PIN")
         elif not emp.pin_set:
             # PIN not yet set — return a special status so Tkinter can show a message
-            return {"role": "employee", "name": emp.full_name or emp.email, "email": emp.email, "pin_set": False,
+            return {"role": "employee", "name": emp.full_name or emp.email, "email": emp.email,
+                    "employee_id": emp.id, "pin_set": False,
                     "monitor_clipboard": emp.monitor_clipboard, "monitor_usb": emp.monitor_usb,
                     "monitor_webmail": emp.monitor_webmail, "monitor_file_scan": emp.monitor_file_scan}
-        return {"role": "employee", "name": emp.full_name or emp.email, "email": emp.email, "pin_set": True,
+        return {"role": "employee", "name": emp.full_name or emp.email, "email": emp.email,
+                "employee_id": emp.id, "pin_set": True,
                 "monitor_clipboard": emp.monitor_clipboard, "monitor_usb": emp.monitor_usb,
                 "monitor_webmail": emp.monitor_webmail, "monitor_file_scan": emp.monitor_file_scan}
 
@@ -131,3 +133,25 @@ async def validate_employee(
         status_code=404,
         detail="not_registered"
     )
+
+
+# ── Employee self-service: risk score (Feature 1) ────────────────────────────
+@router.get("/me/risk")
+async def get_my_risk(
+    email: str,
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    Returns the employee's own risk score and flag status.
+    Called by the agent window (no admin JWT needed — uses email to identify).
+    """
+    result = await db.execute(select(Employee).where(Employee.email == email))
+    emp = result.scalar_one_or_none()
+    if not emp:
+        raise HTTPException(status_code=404, detail="Employee not found")
+    return {
+        "risk_score": emp.risk_score or 0.0,
+        "is_flagged": emp.is_flagged or False,
+        "flag_reason": emp.flag_reason or "",
+        "email": emp.email,
+    }

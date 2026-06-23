@@ -17,9 +17,11 @@ import tkinter as tk
 from tkinter import filedialog, messagebox
 from pathlib import Path
 from datetime import datetime
+from collections import Counter
 
 from audit import AuditLogger
 from policy import PolicyManager
+from gui.local_history import save_event, load_recent, cache_events, clear_all as clear_history
 
 # ── Palette ──────────────────────────────────────────────────────────────────
 BG       = "#0b0f1a"
@@ -94,9 +96,10 @@ class EmployeeHomeWindow(tk.Tk):
         self._threat_rows   = []
         self._scan_running  = threading.Event()
         self._agent_online  = True   # updated by set_agent_status()
+        self._risk_score    = None   # fetched from server in background
 
         self.title("DataShield  —  Protected")
-        W, H = 500, 640
+        W, H = 500, 680
         sw, sh = self.winfo_screenwidth(), self.winfo_screenheight()
         self.geometry(f"{W}x{H}+{sw - W - 40}+{(sh - H) // 2}")
         self.resizable(False, False)
@@ -104,8 +107,18 @@ class EmployeeHomeWindow(tk.Tk):
 
         os.makedirs(base_dir / "output", exist_ok=True)
 
+        # Feature 2: load history — prefer PostgreSQL, fall back to SQLite cache
+        # The actual fetch runs in background after the window is visible.
+        # Pre-populate from the local cache immediately (fastest startup).
+        cached = load_recent(limit=80)
+        self._threat_rows = cached   # may be replaced by server data in 2s
+
         self._build()
         self.protocol("WM_DELETE_WINDOW", self.on_close)
+
+        # Kick off server history fetch after window renders
+        if self.server_url and self.user_email:
+            self.after(2000, self._fetch_history_from_server)
 
     # ─────────────────────────────────────────────────────────────────────────
     #  Build UI
@@ -113,6 +126,7 @@ class EmployeeHomeWindow(tk.Tk):
     def _build(self):
         self._build_header()
         self._build_monitor_strip()
+        self._build_risk_score_bar()   # Feature 1
         self._build_scan_button()
         self._build_threat_feed()
 
@@ -202,7 +216,226 @@ class EmployeeHomeWindow(tk.Tk):
 
         tk.Frame(self, height=1, bg=BORDER).pack(fill="x")
 
-    # ── Scan button ───────────────────────────────────────────────────────────
+    # ── Risk score bar (Feature 1) ─────────────────────────────────────────────
+    def _build_risk_score_bar(self):
+        """Shows the employee's own risk score fetched from the server."""
+        self._risk_bar = tk.Frame(self, bg=BG, pady=8)
+        self._risk_bar.pack(fill="x", padx=16)
+
+        row = tk.Frame(self._risk_bar, bg=BG)
+        row.pack(fill="x")
+
+        tk.Label(row, text="YOUR RISK SCORE", bg=BG, fg=TEXT_MUT,
+                 font=("Segoe UI", 7, "bold")).pack(side="left")
+
+        self._risk_score_var  = tk.StringVar(value="Loading…")
+        self._risk_score_lbl  = tk.Label(
+            row, textvariable=self._risk_score_var,
+            bg=BG, fg=TEXT_MUT, font=("Segoe UI", 9, "bold")
+        )
+        self._risk_score_lbl.pack(side="left", padx=8)
+
+        self._risk_flag_var = tk.StringVar(value="")
+        self._risk_flag_lbl = tk.Label(
+            row, textvariable=self._risk_flag_var,
+            bg=BG, fg=DANGER, font=("Segoe UI", 8, "bold")
+        )
+        self._risk_flag_lbl.pack(side="left")
+
+        tk.Label(row, text="(30-day rolling  ·  refreshes every 5 min)",
+                 bg=BG, fg=TEXT_MUT, font=("Segoe UI", 7)).pack(side="right")
+
+        tk.Frame(self, height=1, bg=BORDER).pack(fill="x")
+
+        # Fetch in background immediately + schedule refresh
+        self.after(1500, self._refresh_risk_score)
+
+    def _refresh_risk_score(self):
+        """Background fetch of employee risk score from server."""
+        def _fetch():
+            score_text = "Unavailable"
+            color      = TEXT_MUT
+            flag_text  = ""
+            if self.server_url and self.user_email:
+                try:
+                    import httpx
+                    resp = httpx.get(
+                        f"{self.server_url}/api/auth/me/risk",
+                        params={"email": self.user_email},
+                        timeout=5,
+                    )
+                    if resp.status_code == 200:
+                        data  = resp.json()
+                        score = float(data.get("risk_score", 0))
+                        score_text = f"{score:.1f}"
+                        color = (
+                            DANGER if score >= 10
+                            else WARN if score >= 5
+                            else OK
+                        )
+                        if data.get("is_flagged"):
+                            flag_text = "  ⚠ FLAGGED"
+                    elif resp.status_code == 404:
+                        score_text = "No data yet"
+                except Exception:
+                    score_text = "Offline"
+            def _update():
+                self._risk_score_var.set(score_text)
+                self._risk_score_lbl.configure(fg=color)
+                self._risk_flag_var.set(flag_text)
+            self.after(0, _update)
+        threading.Thread(target=_fetch, daemon=True).start()
+        # Schedule next refresh in 5 minutes
+        self.after(300_000, self._refresh_risk_score)
+
+    def _fetch_history_from_server(self):
+        """
+        Feature 2 — PostgreSQL-first history load.
+        Runs in background thread 2 seconds after window opens.
+        On success: replaces feed with server data + refreshes local cache.
+        On failure: silently keeps the SQLite fallback already loaded.
+        """
+        def _fetch():
+            try:
+                import httpx
+                resp = httpx.get(
+                    f"{self.server_url}/api/events/my-feed",
+                    params={"email": self.user_email, "limit": 80},
+                    timeout=6,
+                )
+                if resp.status_code == 200:
+                    events = resp.json()   # list of push_threat-compatible dicts
+                    if events:
+                        # Update SQLite cache with authoritative data
+                        threading.Thread(
+                            target=cache_events, args=(events,), daemon=True
+                        ).start()
+                        # Replace the in-memory feed on the UI thread
+                        self.after(0, lambda evts=events: self._replace_feed(evts))
+            except Exception:
+                pass   # Server offline — keep SQLite fallback silently
+
+        threading.Thread(target=_fetch, daemon=True).start()
+
+    def _replace_feed(self, events: list):
+        """Replace _threat_rows with freshly fetched server events and redraw."""
+        self._threat_rows = events
+        self._refresh_feed()
+
+    # ── Feature 5: Override approval / denial notifications ───────────────────
+    def _start_override_poll(self):
+        """
+        Start polling /api/overrides/my-notifications every 60s.
+        Called once after successful login.
+        """
+        self._poll_overrides()
+
+    def _poll_overrides(self):
+        """Check server for any new override decisions and notify the employee."""
+        employee_id = self.state.get("employee_id", "")
+        if not employee_id or not self.server_url:
+            return   # not logged in or no server — stop polling silently
+
+        def _fetch():
+            try:
+                import httpx
+                resp = httpx.get(
+                    f"{self.server_url}/api/overrides/my-notifications",
+                    params={"employee_id": employee_id},
+                    timeout=6,
+                )
+                if resp.status_code == 200:
+                    notifications = resp.json()
+                    for notif in notifications:
+                        # Show each notification on the main thread
+                        self.after(0, lambda n=notif: self._show_override_notification(n))
+            except Exception:
+                pass   # server offline — try again next cycle
+
+        threading.Thread(target=_fetch, daemon=True).start()
+        # Schedule next poll in 60 seconds
+        self.after(60_000, self._poll_overrides)
+
+    def _show_override_notification(self, notif: dict):
+        """Show a native Tkinter popup telling the employee their override result."""
+        status     = notif.get("status", "")
+        admin_note = notif.get("admin_note", "").strip()
+        channel    = notif.get("event_channel", "")
+        pattern    = notif.get("pattern", "")
+
+        approved = (status == "APPROVED")
+        color    = OK if approved else DANGER
+        icon     = "✅" if approved else "❌"
+        title    = "Override Approved" if approved else "Override Denied"
+
+        dialog = tk.Toplevel(self)
+        dialog.title(title)
+        dialog.configure(bg=BG)
+        dialog.resizable(False, False)
+        dw, dh = 420, 230
+        sw, sh = self.winfo_screenwidth(), self.winfo_screenheight()
+        dialog.geometry(f"{dw}x{dh}+{(sw - dw) // 2}+{(sh - dh) // 2}")
+        dialog.grab_set()
+        dialog.lift()
+        dialog.focus_force()
+
+        # Coloured header bar
+        header = tk.Frame(dialog, bg=color, pady=10, padx=14)
+        header.pack(fill="x")
+        tk.Label(
+            header,
+            text=f"{icon}  {title}",
+            bg=color, fg="#0f172a" if approved else "white",
+            font=("Segoe UI", 11, "bold"),
+        ).pack(anchor="w")
+
+        # Context (channel + pattern)
+        if channel or pattern:
+            ctx = f"{channel}  ·  {pattern}".strip(" · ")
+            tk.Label(
+                dialog, text=ctx,
+                bg=BG, fg=TEXT_MUT, font=("Segoe UI", 8),
+            ).pack(anchor="w", padx=14, pady=(8, 0))
+
+        # Main message
+        if approved:
+            msg = "Your override request has been approved by your admin.\nYou may now proceed with the transfer."
+        else:
+            msg = "Your override request was denied by your admin.\nPlease contact your manager if you believe this is an error."
+
+        tk.Label(
+            dialog, text=msg,
+            bg=BG, fg=TEXT,
+            font=("Segoe UI", 9),
+            wraplength=390, justify="left",
+        ).pack(anchor="w", padx=14, pady=(6, 0))
+
+        # Admin note (if present)
+        if admin_note:
+            note_frame = tk.Frame(dialog, bg="#1e293b", padx=10, pady=8)
+            note_frame.pack(fill="x", padx=14, pady=(8, 0))
+            tk.Label(
+                note_frame, text="Admin note:",
+                bg="#1e293b", fg=TEXT_MUT, font=("Segoe UI", 7, "bold"),
+            ).pack(anchor="w")
+            tk.Label(
+                note_frame, text=admin_note,
+                bg="#1e293b", fg=TEXT_SEC, font=("Segoe UI", 8),
+                wraplength=370, justify="left",
+            ).pack(anchor="w", pady=(2, 0))
+
+        # OK button
+        btn_row = tk.Frame(dialog, bg=BG)
+        btn_row.pack(fill="x", padx=14, pady=(10, 14))
+        ok = tk.Label(
+            btn_row, text="OK",
+            bg=color, fg="#0f172a" if approved else "white",
+            font=("Segoe UI", 9, "bold"),
+            padx=20, pady=6, cursor="hand2",
+        )
+        ok.pack(side="right")
+        ok.bind("<Button-1>", lambda e: dialog.destroy())
+
     def _build_scan_button(self):
         section = tk.Frame(self, bg=BG, pady=14)
         section.pack(fill="x", padx=16)
@@ -290,6 +523,7 @@ class EmployeeHomeWindow(tk.Tk):
                     match=None, file_path: str = ""):
         """
         Thread-safe. Add a detection to the feed.
+        Also saves to local SQLite (Feature 2).
         match  — the scanner.Match namedtuple (optional) used for AI explanation
         file_path — full path of the scanned file (optional, for AI explainer)
         """
@@ -305,6 +539,10 @@ class EmployeeHomeWindow(tk.Tk):
             "ai_text":    None,   # populated lazily on first expand
         }
         self._threat_rows.insert(0, entry)
+        # Feature 2: persist to local SQLite
+        threading.Thread(
+            target=save_event, args=(entry,), daemon=True
+        ).start()
         self.after(0, self._refresh_feed)
 
     def set_agent_status(self, online: bool):
@@ -481,7 +719,6 @@ class EmployeeHomeWindow(tk.Tk):
                 if entry.get("ai_text") is None:
                     ai_text_var.set("⏳  Asking Gemini…")
                     threading.Thread(target=_fetch_and_show, daemon=True).start()
-                # Scroll canvas so expanded panel is visible
                 self.after(100, lambda: self._canvas.yview_moveto(
                     self._canvas.yview()[0]))
 
@@ -489,6 +726,100 @@ class EmployeeHomeWindow(tk.Tk):
         if rl not in ("CLEAN",):
             for widget in [card, summary, content, top]:
                 widget.bind("<Button-1>", _toggle)
+
+        # ── Feature 5: Override request button (BLOCK only) ───────────────────
+        if action == "BLOCK":
+            override_bar = tk.Frame(card, bg="#0d1117", pady=5, padx=14)
+            override_bar.pack(fill="x")
+
+            tk.Label(
+                override_bar,
+                text="This transfer was blocked by policy.  ",
+                bg="#0d1117", fg="#475569", font=("Segoe UI", 7),
+            ).pack(side="left")
+
+            req_btn = tk.Label(
+                override_bar,
+                text="Request Override →",
+                bg="#0d1117", fg=ACCENT,
+                font=("Segoe UI", 7, "bold"),
+                cursor="hand2",
+            )
+            req_btn.pack(side="left")
+
+            def _open_override_dialog(e=None, _entry=entry):
+                """Open a small justification dialog and POST to server."""
+                dialog = tk.Toplevel(self)
+                dialog.title("Request Override")
+                dialog.configure(bg=BG)
+                dialog.resizable(False, False)
+                dw, dh = 420, 230
+                sw, sh = self.winfo_screenwidth(), self.winfo_screenheight()
+                dialog.geometry(f"{dw}x{dh}+{(sw - dw) // 2}+{(sh - dh) // 2}")
+                dialog.grab_set()
+
+                tk.Label(dialog, text="Why do you need to send this?",
+                         bg=BG, fg=TEXT, font=("Segoe UI", 10, "bold")).pack(anchor="w", padx=16, pady=(16, 4))
+                tk.Label(dialog,
+                         text=f"Channel: {_entry.get('channel', '')}  ·  Pattern: {_entry.get('pattern', '')}",
+                         bg=BG, fg=TEXT_MUT, font=("Segoe UI", 8)).pack(anchor="w", padx=16)
+
+                txt = tk.Text(dialog, height=4, bg=BG_ROW, fg=TEXT, insertbackground=TEXT,
+                              font=("Segoe UI", 9), relief="flat", padx=8, pady=6,
+                              wrap="word", highlightthickness=1, highlightbackground=BORDER)
+                txt.pack(fill="x", padx=16, pady=(8, 0))
+
+                status_var = tk.StringVar(value="")
+                status_lbl = tk.Label(dialog, textvariable=status_var, bg=BG,
+                                      fg=ACCENT, font=("Segoe UI", 8))
+                status_lbl.pack(anchor="w", padx=16, pady=(4, 0))
+
+                def _submit():
+                    justification = txt.get("1.0", "end").strip()
+                    if not justification:
+                        status_var.set("Please enter a reason.")
+                        return
+                    status_var.set("Submitting…")
+                    dialog.update()
+
+                    def _post():
+                        try:
+                            import httpx, json as _json
+                            payload = {
+                                "employee_id":   self.state.get("employee_id", ""),
+                                "agent_id":      self.state.get("agent_id", ""),
+                                "event_channel": _entry.get("channel", ""),
+                                "event_detail":  _entry.get("detail", ""),
+                                "pattern":       _entry.get("pattern", ""),
+                                "justification": justification,
+                            }
+                            if self.server_url:
+                                httpx.post(
+                                    f"{self.server_url}/api/overrides",
+                                    json=payload, timeout=6,
+                                )
+                            self.after(0, lambda: status_var.set("✓ Request submitted. Your manager will be notified."))
+                            self.after(2500, dialog.destroy)
+                        except Exception as ex:
+                            self.after(0, lambda msg=str(ex): status_var.set(f"Failed: {msg}"))
+
+                    threading.Thread(target=_post, daemon=True).start()
+
+                btn_row = tk.Frame(dialog, bg=BG)
+                btn_row.pack(fill="x", padx=16, pady=(8, 16))
+                tk.Label(btn_row, text="", bg=BG).pack(side="left", expand=True)
+                cancel_btn = tk.Label(btn_row, text="Cancel", bg=BG_ROW, fg=TEXT_SEC,
+                                      font=("Segoe UI", 8, "bold"), padx=10, pady=4, cursor="hand2")
+                cancel_btn.pack(side="left", padx=(0, 6))
+                cancel_btn.bind("<Button-1>", lambda e: dialog.destroy())
+
+                submit_btn = tk.Label(btn_row, text="Submit Request", bg=ACCENT, fg="white",
+                                      font=("Segoe UI", 8, "bold"), padx=12, pady=4, cursor="hand2")
+                submit_btn.pack(side="left")
+                submit_btn.bind("<Button-1>", lambda e: _submit())
+
+            req_btn.bind("<Button-1>", _open_override_dialog)
+
 
     # ─────────────────────────────────────────────────────────────────────────
     #  Scan folder
@@ -582,7 +913,7 @@ class EmployeeHomeWindow(tk.Tk):
                 except Exception:
                     pass   # skip unreadable files silently
 
-            # Summary row
+            # Feature 3: Pattern hit count summary row
             if not found:
                 self.after(0, lambda t=total: self.push_threat(
                     "FILE SCAN", "ALLOW",
@@ -594,6 +925,22 @@ class EmployeeHomeWindow(tk.Tk):
                 ))
             else:
                 n = len(found)
+                # Build pattern breakdown string e.g. "2× CREDIT_CARD, 1× SSN"
+                pattern_counts = Counter(
+                    item["pattern"] for item in found if item.get("pattern")
+                )
+                breakdown = ", ".join(
+                    f"{cnt}× {pat}" for pat, cnt in pattern_counts.most_common()
+                )
+                summary_detail = f"{n} file(s) flagged out of {total} scanned"
+                if breakdown:
+                    summary_detail += f"  —  {breakdown}"
+
+                self.after(0, lambda sd=summary_detail: self.push_threat(
+                    "FILE SCAN", "WARN",
+                    sd,
+                    "MEDIUM", ""
+                ))
                 self.after(0, lambda n=n, t=total: self._scan_status.configure(
                     text=f"Scan complete — {n} issue(s) found in {t} file(s)", fg=WARN
                 ))
@@ -629,6 +976,11 @@ class EmployeeHomeWindow(tk.Tk):
             "Logging out will stop all monitoring on this machine.\n\nAre you sure?",
             parent=self,
         ):
+            # Clear local history so next employee starts fresh
+            try:
+                clear_history()
+            except Exception:
+                pass
             self.destroy()
             if self.logout_callback:
                 self.logout_callback()

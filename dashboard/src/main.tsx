@@ -12,6 +12,7 @@ import Policies from './pages/Policies';
 import Alerts from './pages/Alerts';
 import Encryption from './pages/Encryption';
 import Reports from './pages/Reports';
+import Overrides from './pages/Overrides';
 import './index.css';
 
 const queryClient = new QueryClient({ defaultOptions: { queries: { retry: 1, staleTime: 10_000 } } });
@@ -32,6 +33,7 @@ function ProtectedLayout() {
           <Route path="/alerts"     element={<Alerts />} />
           <Route path="/encryption" element={<Encryption />} />
           <Route path="/reports"    element={<Reports />} />
+          <Route path="/overrides"  element={<Overrides />} />
           <Route path="*"           element={<Navigate to="/" replace />} />
         </Routes>
       </main>

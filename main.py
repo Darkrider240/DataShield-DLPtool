@@ -408,10 +408,11 @@ def show_login_dialog(server_url: str, agent_api_key: str):
                         "Ask your admin to set one in the DataShield console."
                     )
                     return
-                result["role"]  = data["role"]
-                result["name"]  = data["name"]
-                result["email"] = data["email"]
-                result["token"] = ""
+                result["role"]        = data["role"]
+                result["name"]        = data["name"]
+                result["email"]       = data["email"]
+                result["employee_id"] = data.get("employee_id", "")
+                result["token"]       = ""
                 root.destroy()
                 return
             elif emp_resp.status_code == 401:
@@ -502,10 +503,11 @@ def main():
         user_info = {"role": "employee", "name": "Local User", "email": "local@datashield"}
         print("[*] No SERVER_URL in .env — running in standalone mode (no reporting).")
 
-    role  = user_info["role"]
-    name  = user_info["name"]
-    email = user_info["email"]
-    token = user_info.get("token", "")
+    role        = user_info["role"]
+    name        = user_info["name"]
+    email       = user_info["email"]
+    token       = user_info.get("token", "")
+    employee_id = user_info.get("employee_id", "")
 
     # ── ADMIN -> open the desktop management console ────────────────────────────
     if role == "admin":
@@ -624,6 +626,11 @@ def main():
     if monitoring["webmail"]:
         try:
             from comms.http_server import DataShieldHTTPServer
+            # Inject identity so /me and /request_override endpoints work
+            bg_state["employee_id"]    = employee_id
+            bg_state["employee_email"] = email
+            bg_state["employee_name"]  = name
+            bg_state["server_url"]     = server_url
             webmail_server = DataShieldHTTPServer(bg_state, on_event_callback=_bg_event)
             webmail_server.start()
             print("[*] Webmail scan API active on port 5000.")
@@ -708,6 +715,11 @@ def main():
             app.after(30000, _ping_server)
 
         app.after(2000, _ping_server)
+
+        # Start override notification polling (60s interval)
+        if employee_id and server_url:
+            app.state["employee_id"] = employee_id
+            app.after(5000, app._start_override_poll)
 
         print("[*] DataShield running. Opening employee portal...")
         first_name = name.split()[0] if name else "there"

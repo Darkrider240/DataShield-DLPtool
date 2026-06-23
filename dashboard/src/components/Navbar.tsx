@@ -1,23 +1,35 @@
 import { NavLink, useNavigate } from 'react-router-dom';
+import { useQuery } from '@tanstack/react-query';
 import { useAuth } from '../hooks/useAuth';
 import {
   LayoutDashboard, Users, Activity, Shield, Bell,
-  KeyRound, FileText, LogOut, ShieldCheck
+  KeyRound, FileText, LogOut, ShieldCheck, GitPullRequest
 } from 'lucide-react';
+import { getPendingCount } from '../api/overrides';
 
 const NAV = [
-  { to: '/',           icon: LayoutDashboard, label: 'Dashboard',  roles: [] },
-  { to: '/employees',  icon: Users,            label: 'Employees',  roles: [] },
-  { to: '/events',     icon: Activity,         label: 'Events',     roles: [] },
-  { to: '/policies',   icon: Shield,           label: 'Policies',   roles: ['superadmin'] },
-  { to: '/alerts',     icon: Bell,             label: 'Alerts',     roles: [] },
-  { to: '/encryption', icon: KeyRound,         label: 'Encryption', roles: ['superadmin'] },
-  { to: '/reports',    icon: FileText,         label: 'Reports',    roles: ['superadmin', 'analyst'] },
+  { to: '/',           icon: LayoutDashboard,  label: 'Dashboard',  roles: [] },
+  { to: '/employees',  icon: Users,             label: 'Employees',  roles: [] },
+  { to: '/events',     icon: Activity,          label: 'Events',     roles: [] },
+  { to: '/policies',   icon: Shield,            label: 'Policies',   roles: ['superadmin'] },
+  { to: '/alerts',     icon: Bell,              label: 'Alerts',     roles: [] },
+  { to: '/overrides',  icon: GitPullRequest,    label: 'Overrides',  roles: [] },
+  { to: '/encryption', icon: KeyRound,          label: 'Encryption', roles: ['superadmin'] },
+  { to: '/reports',    icon: FileText,          label: 'Reports',    roles: ['superadmin', 'analyst'] },
 ];
 
 export default function Navbar() {
   const { user, logout, hasRole } = useAuth();
   const navigate = useNavigate();
+
+  // Pending override badge — poll every 30s
+  const { data: countData } = useQuery({
+    queryKey: ['overrides-pending-count'],
+    queryFn: () => getPendingCount().then((r: { data: { pending: number } }) => r.data),
+    refetchInterval: 30_000,
+    enabled: !!user,
+  });
+  const pendingCount = countData?.pending ?? 0;
 
   return (
     <aside className="navbar">
@@ -31,6 +43,24 @@ export default function Navbar() {
           <NavLink key={to} to={to} end={to === '/'} className={({ isActive }) => `nav-item ${isActive ? 'active' : ''}`}>
             <Icon size={18} />
             <span>{label}</span>
+            {/* Pending badge on Overrides */}
+            {label === 'Overrides' && pendingCount > 0 && (
+              <span
+                style={{
+                  marginLeft: 'auto',
+                  background: '#f59e0b',
+                  color: '#0f172a',
+                  borderRadius: '999px',
+                  fontSize: '10px',
+                  fontWeight: 800,
+                  padding: '1px 6px',
+                  minWidth: '18px',
+                  textAlign: 'center',
+                }}
+              >
+                {pendingCount}
+              </span>
+            )}
           </NavLink>
         ))}
       </nav>

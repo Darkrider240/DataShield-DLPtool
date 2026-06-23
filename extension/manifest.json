@@ -1,10 +1,20 @@
 {
   "manifest_version": 3,
   "name": "DataShield Webmail DLP Interceptor",
-  "version": "1.0",
-  "description": "Scans and blocks outbound sensitive emails in Gmail and Outlook Web Access (OWA) using local DataShield v2 DLP engine.",
+  "version": "1.2",
+  "description": "Scans and blocks outbound sensitive emails and attachments in Gmail and Outlook using the local DataShield DLP engine.",
+  "background": {
+    "service_worker": "background.js"
+  },
   "permissions": [
     "activeTab"
+  ],
+  "host_permissions": [
+    "https://mail.google.com/*",
+    "https://outlook.office.com/*",
+    "https://outlook.live.com/*",
+    "http://localhost:5000/*",
+    "http://localhost:8001/*"
   ],
   "content_scripts": [
     {
@@ -13,7 +23,11 @@
         "https://outlook.office.com/*",
         "https://outlook.live.com/*"
       ],
-      "js": ["content.js"]
+      "js": ["content.js"],
+      "run_at": "document_idle"
     }
-  ]
+  ],
+  "content_security_policy": {
+    "extension_pages": "script-src 'self'; object-src 'self'"
+  }
 }
