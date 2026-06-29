@@ -197,10 +197,11 @@ class EmployeeHomeWindow(tk.Tk):
         row.pack(fill="x")
 
         channel_defs = [
-            ("clipboard", "📋 Clipboard"),
-            ("usb",       "💾 USB"),
-            ("webmail",   "📧 Webmail"),
-            ("file_scan", "📂 File Scan"),
+            ("clipboard", "Clipboard"),
+            ("usb",       "USB Drive"),
+            ("webmail",   "Webmail"),
+            ("file_scan", "File Scan"),
+            ("cloud",     "Cloud DLP"),
         ]
         self._monitor_pills = {}
         for key, label in channel_defs:

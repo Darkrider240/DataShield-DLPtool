@@ -590,6 +590,7 @@ def main():
         "usb":       user_info.get("monitor_usb",       True),
         "webmail":   user_info.get("monitor_webmail",   True),
         "file_scan": user_info.get("monitor_file_scan", True),
+        "cloud":     user_info.get("monitor_cloud",     True),
     }
     disabled = [k.upper() for k, v in monitoring.items() if not v]
     if disabled:
@@ -600,6 +601,7 @@ def main():
     clipboard_monitor = None
     usb_monitor       = None
     webmail_server    = None
+    cloud_monitor     = None
 
     if monitoring["clipboard"]:
         try:
@@ -639,6 +641,21 @@ def main():
     else:
         print("[*] Webmail monitor DISABLED by admin policy.")
 
+    if monitoring["cloud"]:
+        try:
+            from comms.cloud_watcher import CloudWatcher
+            cloud_monitor = CloudWatcher(bg_state, on_finding_callback=_bg_event)
+            cloud_monitor.start()
+            if cloud_monitor.running:
+                providers = ", ".join(cloud_monitor.active_providers)
+                print(f"[*] Cloud DLP active — providers: {providers}")
+            else:
+                print("[*] Cloud DLP: no sync folders found on this machine.")
+        except Exception as e:
+            print("[*] Cloud monitor unavailable:", e)
+    else:
+        print("[*] Cloud monitor DISABLED by admin policy.")
+
     # Step 4: System tray
     run_system_tray(name, email)
 
@@ -648,7 +665,7 @@ def main():
 
         def _do_logout():
             print("[*] Employee logged out.")
-            for mon in [clipboard_monitor, usb_monitor]:
+            for mon in [clipboard_monitor, usb_monitor, cloud_monitor]:
                 if mon:
                     try: mon.stop()
                     except Exception: pass
@@ -701,6 +718,8 @@ def main():
             usb_monitor.on_event_callback = _bg_event_with_feed
         if webmail_server and hasattr(webmail_server, "on_event_callback"):
             webmail_server.on_event_callback = _bg_event_with_feed
+        if cloud_monitor and hasattr(cloud_monitor, "on_finding_callback"):
+            cloud_monitor.on_finding_callback = _bg_event_with_feed
 
         def _ping_server():
             online = False
