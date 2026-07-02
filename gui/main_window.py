@@ -217,6 +217,16 @@ class EmployeeHomeWindow(tk.Tk):
 
         tk.Frame(self, height=1, bg=BORDER).pack(fill="x")
 
+    def update_monitor_pills(self, monitors: dict):
+        """Dynamically updates the color and text of active/inactive monitor pills."""
+        def _update():
+            self.monitors = monitors
+            for key, (pill, lbl) in self._monitor_pills.items():
+                active = monitors.get(key, False)
+                pill.configure(bg=(OK if active else BG_ROW))
+                lbl.configure(bg=(OK if active else BG_ROW), fg="white" if active else TEXT_MUT)
+        self.after(0, _update)
+
     # ── Risk score bar (Feature 1) ─────────────────────────────────────────────
     def _build_risk_score_bar(self):
         """Shows the employee's own risk score fetched from the server."""
@@ -550,6 +560,11 @@ class EmployeeHomeWindow(tk.Tk):
         """Update the connection status bar. Thread-safe via after()."""
         self._agent_online = online
         self.after(0, self._update_status_bar)
+
+    def set_status_text(self, text: str, color=None):
+        """Update the scan status label on the main window. Thread-safe."""
+        fg = color if color is not None else TEXT_MUT
+        self.after(0, lambda: self._scan_status.configure(text=text, fg=fg))
 
     def _update_status_bar(self):
         if self._agent_online:

@@ -92,6 +92,10 @@ class HeartbeatRequest(BaseModel):
 
 class HeartbeatResponse(BaseModel):
     policy_update_available: bool
+    monitor_clipboard: bool = True
+    monitor_usb: bool = True
+    monitor_webmail: bool = True
+    monitor_file_scan: bool = True
 
 
 # ── Event ─────────────────────────────────────────────────────────────────────

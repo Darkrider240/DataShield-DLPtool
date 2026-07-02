@@ -13,14 +13,27 @@ DataShield monitors and prevents sensitive data from leaving your organisation a
 |---|---|
 | 📂 **Files** | Scan before sending — employee picks folder, agent scans with 40+ DLP patterns |
 | 📧 **Webmail** | Browser extension intercepts Gmail attachment upload before it ever reaches Gmail |
-| 📋 **Clipboard** | Background monitor flags paste of sensitive content |
-| 💾 **USB** | Detects insertion, scans files copied to removable drives |
+| 📋 **Clipboard** | Background monitor flags paste of **any single** sensitive entity (Aadhaar, SSN, PAN, IBAN, IFSC, ICD-10, credit card, API keys…) — clears clipboard immediately |
+| 💾 **USB** | Live watchdog starts **immediately on insertion** (before the mount scan) — intercepts sensitive file copies in real time. Encrypted/password-protected files that cannot be scanned are flagged with an admin prompt |
 
 Every violation is:
 - Encrypted per-employee (AES-256-GCM envelope encryption)
 - Reported to the central server in real-time via WebSocket
 - Scored by a risk engine with time-of-day, volume, and repeat multipliers
 - Explained by Gemini AI (shown to the employee inline, and in the admin dashboard)
+
+---
+
+## Recent Improvements
+
+| Area | Change |
+|---|---|
+| 🔴 **USB — No Blind Spot** | Live watchdog observer now arms **before** the full mount scan. Files copied during the scan are intercepted in real time (previously ignored until scan completed) |
+| 🔒 **USB — Encrypted File Detection** | Password-protected / encrypted PDFs and DOCX files that cannot be content-scanned are flagged as `UNREADABLE` and an admin prompt offers to remove them from the drive |
+| 📋 **Clipboard — Single Entity Block** | Reduced minimum length filter from 10 → 4 chars; any single high-value pattern (weight ≥ 1.5) now triggers a block even without multiple co-located matches |
+| 🔇 **PDF Noise Suppression** | Silenced `pdfminer` internal loggers — "Data-loss while decompressing corrupted data" warnings are suppressed; unreadable PDFs are skipped silently |
+| 🤖 **Gemini Multi-Model Fallback** | Both `ai_explain.py` and `server/api/reports.py` now try `gemini-2.5-flash → 2.0-flash → 1.5-flash → 1.5-flash-8b` in sequence and continue on **any** error (not just 429), returning a static fallback if all fail |
+| 🖥️ **Server Startup Fix** | Server must be started from the **project root** with `uvicorn server.main:app --port 8001 --reload` (not from inside `server/`) |
 
 ---
 
@@ -131,10 +144,10 @@ pip install -r server/requirements.txt
 ### 1. Server (FastAPI)
 
 ```bash
-cd server
-cp .env.example .env         # fill in DB_URL, JWT_SECRET, GEMINI_API_KEY
-python init_db.py            # seeds admin@datashield.local / Admin@123
-uvicorn main:app --host 0.0.0.0 --port 8001 --reload
+# From project root (not inside server/)
+cp server/.env.example server/.env   # fill in DB_URL, JWT_SECRET_KEY, GEMINI_API_KEY, AGENT_API_KEY
+python -m server.init_db             # seeds admin@datashield.local / Admin@123
+uvicorn server.main:app --host 0.0.0.0 --port 8001 --reload
 ```
 
 ### 2. Admin Dashboard (React)
@@ -211,8 +224,10 @@ SMTP_PASS=your-app-password
 ```env
 SERVER_URL=http://localhost:8001
 GEMINI_API_KEY=your-gemini-key
-AGENT_SECRET=your-agent-secret
+AGENT_API_KEY=your-agent-api-key   # must match AGENT_API_KEY in server/.env
 ```
+
+> **Note:** `AGENT_API_KEY` must be identical in both `server/.env` and the agent root `.env`. The agent uses it as a shared secret when posting events to the server.
 
 ---
 

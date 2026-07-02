@@ -40,38 +40,43 @@ def explain_finding(match: Match, file_path: str, api_key: str = None) -> str:
         return "AI Explanation skipped: Gemini API key not configured."
 
     # 3. Perform Gemini API call using the new google.genai SDK
-    try:
-        from google import genai                          # new SDK
-        from google.genai import types as genai_types
+    from google import genai                          # new SDK
+    from google.genai import types as genai_types
+    from google.genai.errors import APIError
 
-        client = genai.Client(api_key=effective_api_key)
+    client = genai.Client(api_key=effective_api_key)
+    prompt = (
+        f"You are a data privacy compliance expert. Explain DLP findings to non-technical "
+        f"users in clear, plain English. Be specific, concise, and always cite the exact regulation article.\n\n"
+        f"A file named '{filename}' triggered a {match.pattern_name} pattern on line "
+        f"{match.line_number}. The matched data category is {match.category}. The applicable regulations "
+        f"are: {regs_str}.\n\n"
+        f"Answer these three questions in exactly three short paragraphs:\n"
+        f"1. Why is this a data privacy risk?\n"
+        f"2. Which specific regulation article is violated and what does it require?\n"
+        f"3. What are the top two remediation steps the user should take right now?"
+    )
 
-        prompt = (
-            f"You are a data privacy compliance expert. Explain DLP findings to non-technical "
-            f"users in clear, plain English. Be specific, concise, and always cite the exact regulation article.\n\n"
-            f"A file named '{filename}' triggered a {match.pattern_name} pattern on line "
-            f"{match.line_number}. The matched data category is {match.category}. The applicable regulations "
-            f"are: {regs_str}.\n\n"
-            f"Answer these three questions in exactly three short paragraphs:\n"
-            f"1. Why is this a data privacy risk?\n"
-            f"2. Which specific regulation article is violated and what does it require?\n"
-            f"3. What are the top two remediation steps the user should take right now?"
-        )
+    models_to_try = ["gemini-2.5-flash", "gemini-2.0-flash", "gemini-1.5-flash", "gemini-1.5-flash-8b"]
+    for model_name in models_to_try:
+        try:
+            response = client.models.generate_content(
+                model=model_name,
+                contents=prompt,
+                config=genai_types.GenerateContentConfig(
+                    max_output_tokens=300,
+                    temperature=0.2,
+                ),
+            )
+            explanation = response.text.strip() if response.text else fallback_explanation
+            _explanation_cache[cache_key] = explanation
+            return explanation
+        except APIError as e:
+            print(f"Warning: Gemini API request failed with {model_name}: {e.message} (code={getattr(e, 'code', 'unknown')})", file=sys.stderr)
+            continue
+        except Exception as e:
+            print(f"Warning: Gemini API request failed with {model_name}: {e}", file=sys.stderr)
+            continue
 
-        response = client.models.generate_content(
-            model="gemini-2.0-flash",
-            contents=prompt,
-            config=genai_types.GenerateContentConfig(
-                max_output_tokens=300,
-                temperature=0.2,
-            ),
-        )
-
-        explanation = response.text.strip() if response.text else fallback_explanation
-        _explanation_cache[cache_key] = explanation
-        return explanation
-
-    except Exception as e:
-        print(f"Warning: Gemini API request failed: {e}. Falling back to static template.", file=sys.stderr)
-        _explanation_cache[cache_key] = fallback_explanation
-        return fallback_explanation
+    _explanation_cache[cache_key] = fallback_explanation
+    return fallback_explanation

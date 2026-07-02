@@ -1,10 +1,22 @@
 import re
 import os
 import sys
+import logging
 import pdfplumber
 import docx
 from dataclasses import dataclass
 from pathlib import Path
+
+# ── Silence pdfminer's internal loggers ──────────────────────────────────────
+# pdfminer (used by pdfplumber) prints noisy warnings like
+# "Data-loss while decompressing corrupted data" for encrypted / partially
+# corrupted PDFs.  These are expected and do not need to surface to the user.
+for _noisy_logger in (
+    "pdfminer", "pdfminer.pdfdocument", "pdfminer.pdfpage",
+    "pdfminer.pdfinterp", "pdfminer.converter", "pdfminer.cmapdb",
+    "pdfminer.high_level",
+):
+    logging.getLogger(_noisy_logger).setLevel(logging.CRITICAL)
 
 @dataclass
 class Match:
@@ -12,11 +24,29 @@ class Match:
     line_number: int
     matched_value: str          # Redacted to first 4 + asterisks for display
     pattern_name: str
-    category: str               # PII | FINANCIAL | SECRETS | HEALTH
+    category: str               # PII | FINANCIAL | SECRETS | HEALTH | UNREADABLE
     base_weight: float
     regulation_tags: list[str]  # e.g. ["GDPR Art.9", "HIPAA §164.312"]
     context_lines: list[str]    # ±2 lines around the match
     proximity_triggered: bool = False
+
+
+def _unreadable_match(file_path: str, reason: str) -> "Match":
+    """Sentinel match returned when a file cannot be read (encrypted/corrupted).
+
+    Callers (e.g. the USB watcher) check for category == 'UNREADABLE' to
+    raise a warning instead of silently allowing the transfer.
+    """
+    return Match(
+        file_path=file_path,
+        line_number=0,
+        matched_value=reason,
+        pattern_name="UNREADABLE_FILE",
+        category="UNREADABLE",
+        base_weight=0.0,
+        regulation_tags=[],
+        context_lines=[],
+    )
 
 
 # Default Regex Rule Definitions (compiled constants)
@@ -116,28 +146,38 @@ def scan_file(file_path: str, config: dict) -> list[Match]:
             with open(resolved_path, "r", encoding="utf-8", errors="replace") as f:
                 lines = f.read().splitlines()
         elif suffix == ".pdf":
-            with pdfplumber.open(resolved_path) as pdf:
-                for page in pdf.pages:
-                    text = page.extract_text()
-                    if text:
-                        lines.extend(text.splitlines())
+            try:
+                with pdfplumber.open(resolved_path) as pdf:
+                    # pdfplumber raises PDFPasswordIncorrect for encrypted PDFs
+                    for page in pdf.pages:
+                        text = page.extract_text()
+                        if text:
+                            lines.extend(text.splitlines())
+            except Exception:
+                # Encrypted / password-protected / corrupted PDF.
+                # Return a sentinel so callers can flag this as suspicious
+                # on inbound USB transfers — content cannot be verified.
+                return [_unreadable_match(file_path, "encrypted or password-protected PDF")]
         elif suffix == ".docx":
-            doc = docx.Document(resolved_path)
-            lines = [p.text for p in doc.paragraphs]
+            try:
+                doc = docx.Document(resolved_path)
+                lines = [p.text for p in doc.paragraphs]
+            except Exception:
+                return [_unreadable_match(file_path, "encrypted or password-protected DOCX")]
         else:
-            # Skip unsupported/binary formats silently
+            # Unsupported / binary format — not suspicious, just unreadable
             return []
-    except UnicodeDecodeError as e:
-        print(f"Warning: UnicodeDecodeError reading {file_path}: {e}", file=sys.stderr)
+    except UnicodeDecodeError:
+        # Binary or mis-encoded text file — skip silently (not suspicious)
         return []
-    except PermissionError as e:
-        print(f"Warning: PermissionError accessing {file_path}: {e}", file=sys.stderr)
+    except PermissionError:
+        # File still locked by the OS during copy — transient, skip silently
         return []
-    except FileNotFoundError as e:
-        print(f"Warning: FileNotFoundError: {file_path}: {e}", file=sys.stderr)
+    except FileNotFoundError:
+        # File disappeared between detection and scan — skip silently
         return []
-    except Exception as e:
-        print(f"Warning: Failed to read file {file_path}: {e}", file=sys.stderr)
+    except Exception:
+        # Any other read error — skip silently
         return []
 
     # 3. Retrieve Policies/Rules

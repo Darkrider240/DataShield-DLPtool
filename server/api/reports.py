@@ -16,6 +16,60 @@ from server.models.user import AdminUser
 settings = get_settings()
 router = APIRouter(prefix="/api/reports", tags=["reports"])
 
+# ── Gemini singleton + response cache ────────────────────────────────────────
+# One client shared for the whole server process — not re-created per request.
+_gemini_client = None
+_GEMINI_MODELS  = ["gemini-2.5-flash", "gemini-2.0-flash", "gemini-1.5-flash", "gemini-1.5-flash-8b"]
+
+# Simple in-process cache to avoid hammering free-tier quota
+_summary_cache: dict = {}
+_CACHE_TTL_SECONDS = 600   # reuse last result for 10 minutes
+
+
+def _get_gemini_client():
+    """Lazily initialise and return the singleton Gemini client."""
+    global _gemini_client
+    if _gemini_client is None and settings.GEMINI_API_KEY:
+        try:
+            from google import genai as _genai
+            _gemini_client = _genai.Client(api_key=settings.GEMINI_API_KEY)
+        except Exception:
+            _gemini_client = None
+    return _gemini_client
+
+
+def _call_gemini(prompt: str) -> str:
+    """Try each model in fallback order; return a friendly string on any error."""
+    client = _get_gemini_client()
+    if client is None:
+        return "Gemini API key not configured — summary unavailable."
+
+    try:
+        from google.genai.errors import APIError
+    except ImportError:
+        APIError = Exception  # type: ignore
+
+    errors = []
+    for model_name in _GEMINI_MODELS:
+        try:
+            resp = client.models.generate_content(model=model_name, contents=prompt)
+            return resp.text or "No summary generated."
+        except APIError as e:
+            msg = getattr(e, "message", str(e))
+            errors.append(f"{model_name}: {msg}")
+            # Try next model in fallback order
+            continue
+        except Exception as e:
+            errors.append(f"{model_name}: {e}")
+            continue
+
+    # All models exhausted
+    err_str = " | ".join(errors)
+    return (
+        f"Gemini API could not generate summary. Details: {err_str}. "
+        "Please check your API key / model permissions or try again later."
+    )
+
 
 # ── Admin console overview stats ─────────────────────────────────────────────
 @router.get("/overview")
@@ -26,16 +80,15 @@ async def admin_overview(
     """
     Fast summary for the admin console Overview tab.
     Returns total_employees, flagged_employees, open_alerts, total_events (today).
-    The is_online count is computed client-side from /api/agents heartbeats.
     """
     now = datetime.now(timezone.utc)
     today = now.replace(hour=0, minute=0, second=0, microsecond=0)
 
-    total_emp   = (await db.execute(select(func.count(Employee.id)))).scalar_one()
-    flagged_emp = (await db.execute(
+    total_emp    = (await db.execute(select(func.count(Employee.id)))).scalar_one()
+    flagged_emp  = (await db.execute(
         select(func.count(Employee.id)).where(Employee.is_flagged == True)
     )).scalar_one()
-    open_alerts = (await db.execute(
+    open_alerts  = (await db.execute(
         select(func.count(Alert.id)).where(Alert.status == "OPEN")
     )).scalar_one()
     today_events = (await db.execute(
@@ -43,14 +96,14 @@ async def admin_overview(
     )).scalar_one()
 
     return {
-        "total_employees":    total_emp,
-        "flagged_employees":  flagged_emp,
-        "open_alerts":        open_alerts,
-        "total_events":       today_events,
+        "total_employees":   total_emp,
+        "flagged_employees": flagged_emp,
+        "open_alerts":       open_alerts,
+        "total_events":      today_events,
     }
 
 
-# ── Compliance metrics (full, for web dashboard + admin console) ──────────────
+# ── Compliance metrics ────────────────────────────────────────────────────────
 @router.get("/metrics", response_model=ComplianceMetricsOut)
 async def compliance_metrics(
     db: AsyncSession = Depends(get_db),
@@ -82,7 +135,6 @@ async def compliance_metrics(
             and_(DLPEvent.occurred_at >= today, DLPEvent.action_taken == "BLOCK")
         )
     )).scalar_one()
-
     flagged   = (await db.execute(
         select(func.count(Employee.id)).where(Employee.is_flagged == True)
     )).scalar_one()
@@ -95,7 +147,6 @@ async def compliance_metrics(
         )
     )).scalar_one()
 
-    # Regulation hit counts (all-time)
     ev_result = await db.execute(select(DLPEvent.regulation_tags))
     reg_counts: dict[str, int] = {}
     for row in ev_result.scalars():
@@ -115,7 +166,7 @@ async def compliance_metrics(
     )
 
 
-# ── Gemini executive summary ─────────────────────────────────────────────────
+# ── Gemini executive summary ──────────────────────────────────────────────────
 @router.get(
     "/executive-summary",
     response_model=ExecutiveSummaryOut,
@@ -123,13 +174,26 @@ async def compliance_metrics(
 )
 async def executive_summary(db: AsyncSession = Depends(get_db)):
     """
-    Calls the live compliance_metrics query and feeds the numbers to Gemini
-    for a concise executive DLP posture summary with remediation recommendations.
+    Feeds live compliance numbers to Gemini for an executive DLP posture summary.
+
+    Results are cached for 10 minutes so repeated clicks don't burn quota.
+    Model fallback order: gemini-2.0-flash → 1.5-flash → 1.5-flash-8b.
     """
+    global _summary_cache
     now = datetime.now(timezone.utc)
+
+    # Return cached result if it is still fresh
+    if _summary_cache:
+        expires = _summary_cache.get("expires_at")
+        if expires and now < expires:
+            return ExecutiveSummaryOut(
+                summary=_summary_cache["summary"],
+                generated_at=_summary_cache["generated_at"],
+            )
+
+    # Gather live numbers
     today = now.replace(hour=0, minute=0, second=0, microsecond=0)
 
-    # Collect live numbers inline (avoid calling the decorated function directly)
     total = (await db.execute(
         select(func.count(DLPEvent.id)).where(DLPEvent.occurred_at >= today)
     )).scalar_one()
@@ -155,24 +219,22 @@ async def executive_summary(db: AsyncSession = Depends(get_db)):
         select(func.count(Alert.id)).where(Alert.status == "OPEN")
     )).scalar_one()
 
-    context = (
-        f"DataShield DLP Summary — Generated {now.strftime('%Y-%m-%d %H:%M UTC')}\n"
-        f"Today: {total} total events, {high} HIGH violations, {med} MEDIUM violations, "
-        f"{blk} blocked sends.\n"
-        f"{open_alts} open alerts. {flagged} flagged employees.\n\n"
-        "Provide a concise executive summary (3-5 sentences) of the DLP security posture "
-        "and list the top 3 recommended remediation actions."
+    # Short, token-efficient prompt
+    prompt = (
+        f"DLP security report {now.strftime('%Y-%m-%d %H:%M UTC')}: "
+        f"{total} events today ({high} HIGH, {med} MEDIUM, {blk} blocked), "
+        f"{open_alts} open alerts, {flagged} flagged employees. "
+        "Write a 3-5 sentence executive security posture summary, "
+        "then list exactly 3 numbered remediation actions. Be concise."
     )
 
-    summary_text = "Gemini API key not configured — summary unavailable."
-    if settings.GEMINI_API_KEY:
-        try:
-            import google.generativeai as genai
-            genai.configure(api_key=settings.GEMINI_API_KEY)
-            model = genai.GenerativeModel("gemini-2.0-flash")
-            response = model.generate_content(context)
-            summary_text = response.text
-        except Exception as e:
-            summary_text = f"Gemini API error: {e}"
+    summary_text = _call_gemini(prompt)
+
+    # Cache the result
+    _summary_cache = {
+        "summary":      summary_text,
+        "generated_at": now,
+        "expires_at":   now + timedelta(seconds=_CACHE_TTL_SECONDS),
+    }
 
     return ExecutiveSummaryOut(summary=summary_text, generated_at=now)

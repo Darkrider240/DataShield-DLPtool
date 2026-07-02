@@ -701,13 +701,17 @@ def main():
         _orig_bg = _bg_event
         def _bg_event_with_feed(channel, action, detail, decision=None, **kwargs):
             _orig_bg(channel, action, detail, decision=decision, **kwargs)
-            if action in ("ALLOW", "LOG"):
+            # Allow all USB events to show in threat feed even if CLEAN/LOG
+            is_usb_sys = (channel == "USB")
+            if action in ("ALLOW", "LOG") and not is_usb_sys:
                 return
             rl = "HIGH"
             if decision and hasattr(decision, "risk_level"):
                 rl = decision.risk_level
             elif action == "WARN":
                 rl = "MEDIUM"
+            elif action == "LOG":
+                rl = "CLEAN"
             pattern = getattr(decision, "top_pattern", "") if decision else ""
             app.after(0, lambda c=channel, a=action, d=detail, r=rl, p=pattern:
                        app.push_threat(c, a, d, r, p))
@@ -720,6 +724,76 @@ def main():
             webmail_server.on_event_callback = _bg_event_with_feed
         if cloud_monitor and hasattr(cloud_monitor, "on_finding_callback"):
             cloud_monitor.on_finding_callback = _bg_event_with_feed
+
+        def _handle_monitoring_update(new_monitors):
+            nonlocal monitoring, clipboard_monitor, usb_monitor, webmail_server
+            print(f"[*] Dynamic config sync: Received monitoring state: {new_monitors}")
+            
+            # Update local config state
+            monitoring.update(new_monitors)
+            if app and app.winfo_exists():
+                app.update_monitor_pills(monitoring)
+
+            # 1. Clipboard Monitor
+            if monitoring.get("clipboard", True):
+                if not clipboard_monitor:
+                    try:
+                        from comms.clipboard_monitor import ClipboardMonitor
+                        clipboard_monitor = ClipboardMonitor(bg_state, on_finding_callback=_bg_event_with_feed)
+                        clipboard_monitor.start()
+                        print("[*] Clipboard monitor activated dynamically.")
+                    except Exception as e:
+                        print("[*] Failed to start clipboard monitor dynamically:", e)
+                elif not clipboard_monitor.running:
+                    clipboard_monitor.start()
+                    print("[*] Clipboard monitor started dynamically.")
+            else:
+                if clipboard_monitor and clipboard_monitor.running:
+                    clipboard_monitor.stop()
+                    print("[*] Clipboard monitor stopped dynamically.")
+
+            # 2. USB Monitor
+            if monitoring.get("usb", True):
+                if not usb_monitor:
+                    try:
+                        from comms.usb_watcher import USBWatcher
+                        usb_monitor = USBWatcher(bg_state, on_report_callback=None, on_event_callback=_bg_event_with_feed)
+                        usb_monitor.start()
+                        print("[*] USB watcher activated dynamically.")
+                    except Exception as e:
+                        print("[*] Failed to start USB watcher dynamically:", e)
+                elif not usb_monitor.running:
+                    usb_monitor.start()
+                    print("[*] USB watcher started dynamically.")
+            else:
+                if usb_monitor and usb_monitor.running:
+                    usb_monitor.stop()
+                    print("[*] USB watcher stopped dynamically.")
+
+            # 3. Webmail / Email Monitor
+            if monitoring.get("webmail", True):
+                if not webmail_server:
+                    try:
+                        from comms.http_server import DataShieldHTTPServer
+                        bg_state["employee_id"]    = employee_id
+                        bg_state["employee_email"] = email
+                        bg_state["employee_name"]  = name
+                        bg_state["server_url"]     = server_url
+                        webmail_server = DataShieldHTTPServer(bg_state, on_event_callback=_bg_event_with_feed)
+                        webmail_server.start()
+                        print("[*] Webmail scan API activated dynamically.")
+                    except Exception as e:
+                        print("[*] Failed to start Webmail scan API dynamically:", e)
+                elif not webmail_server.running:
+                    webmail_server.start()
+                    print("[*] Webmail scan API started dynamically.")
+            else:
+                if webmail_server and webmail_server.running:
+                    webmail_server.stop()
+                    print("[*] Webmail scan API stopped dynamically.")
+
+        if client:
+            client.on_monitoring_update = _handle_monitoring_update
 
         def _ping_server():
             online = False

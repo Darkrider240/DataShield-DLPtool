@@ -149,11 +149,22 @@ async def heartbeat(body: HeartbeatRequest, db: AsyncSession = Depends(get_db)):
         latest_version != body.current_policy_version
         or agent.policy_update_available
     )
-    if needs_update:
+    if agent.policy_update_available:
         agent.policy_update_available = False
 
+    # Fetch employee to get active monitoring settings
+    emp_result = await db.execute(select(Employee).where(Employee.id == agent.employee_id))
+    emp = emp_result.scalar_one_or_none()
+
     await db.commit()
-    return HeartbeatResponse(policy_update_available=needs_update)
+
+    return HeartbeatResponse(
+        policy_update_available=needs_update,
+        monitor_clipboard=emp.monitor_clipboard if emp else True,
+        monitor_usb=emp.monitor_usb if emp else True,
+        monitor_webmail=emp.monitor_webmail if emp else True,
+        monitor_file_scan=emp.monitor_file_scan if emp else True,
+    )
 
 
 # ── Agent: fetch current policy ──────────────────────────────────────────────
