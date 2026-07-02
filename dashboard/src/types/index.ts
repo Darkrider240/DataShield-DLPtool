@@ -51,7 +51,16 @@ export interface DLPEvent {
   regulation_tags: string[];
   occurred_at: string;
   ingested_at: string;
-  file_path?: string;
+  // Employee attribution (resolved server-side from employee table)
+  employee_name?:  string;
+  employee_email?: string;
+  employee_dept?:  string;
+  // Email metadata (WEBMAIL / EMAIL channel only)
+  sender_email?:     string;
+  recipient_emails?: string;
+  email_subject?:    string;
+  // Decrypted fields (analyst / superadmin only)
+  file_path?:      string;
   ai_explanation?: string;
 }
 
@@ -97,4 +106,38 @@ export interface ComplianceMetrics {
 export interface WsMessage {
   type: 'EVENT' | 'ALERT';
   [key: string]: unknown;
+}
+
+// Feature 6 — Employee report card
+export interface EmployeeStats {
+  employee_id: string;
+  employee_name: string;
+  employee_email: string;
+  risk_score: number;
+  is_flagged: boolean;
+  flag_reason: string;
+  total_events_30d: number;
+  high_events_30d: number;
+  medium_events_30d: number;
+  low_events_30d: number;
+  top_patterns: string[];
+  channel_breakdown: Record<string, number>;
+  daily_risk_scores: { date: string; score: number }[];
+  org_avg_risk_score: number;
+}
+
+// Feature 5 — Override requests
+export interface OverrideRequest {
+  id: string;
+  employee_id: string;
+  employee_name?: string;
+  employee_email?: string;
+  event_channel: string;
+  event_detail: string;
+  pattern: string;
+  justification: string;
+  status: 'PENDING' | 'APPROVED' | 'DENIED';
+  admin_note?: string;
+  created_at: string;
+  reviewed_at?: string;
 }

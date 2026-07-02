@@ -1,408 +1,1010 @@
-import os
-import yaml
-import tkinter as tk
-from tkinter import ttk, messagebox, filedialog
-from pathlib import Path
+"""
+DataShield Employee Home Window
+---------------------------------
+A focused, minimal window for employees. Shows:
+  - Connection status to the DataShield server
+  - Protection status (which monitors are running)
+  - "Scan Folder Before Sending" — the primary employee action
+  - Live threat feed updated by both manual scans AND background monitors
+  - Logout button
 
-# Import shared modules
+All monitoring (clipboard, USB, webmail) runs silently in the background.
+"""
+import os
+import sys
+import threading
+import tkinter as tk
+from tkinter import filedialog, messagebox
+from pathlib import Path
+from datetime import datetime
+from collections import Counter
+
 from audit import AuditLogger
 from policy import PolicyManager
-from gui.scan_tab import ScanTab
-from gui.results_tab import ResultsTab
-from gui.report_tab import ReportTab
-from gui.comms_tab import CommsTab
+from gui.local_history import save_event, load_recent, cache_events, clear_all as clear_history
 
-class MainWindow(tk.Tk):
+# ── Palette ──────────────────────────────────────────────────────────────────
+BG       = "#0b0f1a"
+BG_CARD  = "#0f172a"
+BG_ROW   = "#1e293b"
+BORDER   = "#1e293b"
+ACCENT   = "#6366f1"
+ACCENT2  = "#0ea5e9"
+OK       = "#22c55e"
+WARN     = "#f59e0b"
+DANGER   = "#ef4444"
+TEXT     = "#e2e8f0"
+TEXT_SEC = "#94a3b8"
+TEXT_MUT = "#475569"
+
+RISK_COLOR = {
+    "CLEAN":  OK,
+    "LOW":    ACCENT2,
+    "MEDIUM": WARN,
+    "HIGH":   DANGER,
+}
+
+
+class EmployeeHomeWindow(tk.Tk):
     """
-    MainWindow — role-aware Tkinter GUI.
-    role='admin'    → all tabs visible
-    role='employee' → only Scan + Detections (monitors run in background via main.py)
+    Employee-facing DataShield window.
+
+    What it shows:
+      1. Header        — name, email, connection status, logout button
+      2. Monitor pills — which channels are active right now
+      3. Scan button   — big "Browse & Scan Folder" button
+      4. Threat feed   — live detections from manual scans + background monitors
+
+    Public API (called from background monitors in main.py):
+      push_threat(channel, action, detail, risk_level, pattern)
+      set_agent_status(online: bool)
     """
-    def __init__(self, role: str = "employee", user_name: str = "", user_email: str = ""):
+
+    def __init__(
+        self,
+        user_name:       str  = "",
+        user_email:      str  = "",
+        monitors:        dict = None,
+        server_url:      str  = "",
+        logout_callback  = None,   # callable() — what to do on logout
+    ):
         super().__init__()
-        self.role       = role
-        self.user_name  = user_name
-        self.user_email = user_email
-        is_admin        = (role == "admin")
 
-        title_suffix = f"  |  {user_name or user_email}  [{role.upper()}]"
-        self.title(f"DataShield{title_suffix}")
-        self.geometry("920x680")
-        self.minsize(820, 600)
+        self.user_name       = user_name or user_email.split("@")[0].title()
+        self.user_email      = user_email
+        self.monitors        = monitors or {
+            "clipboard": True, "usb": True,
+            "webmail": True,   "file_scan": True,
+        }
+        self.server_url      = server_url
+        self.logout_callback = logout_callback
 
-        self.base_dir           = Path(__file__).resolve().parent.parent
-        self.allowlist_path     = self.base_dir / "rules" / "allowlist.yaml"
-        self.default_rules_path = self.base_dir / "rules" / "default_rules.yaml"
-        self.audit_log_path     = self.base_dir / "output" / "datashield_agent_audit.log"
-
+        base_dir = Path(__file__).resolve().parent.parent
         self.state = {
-            "scan_directory":   "",
-            "scan_results":     [],
-            "audit_logger":     AuditLogger(str(self.audit_log_path)),
+            "audit_logger":     AuditLogger(
+                str(base_dir / "output" / "datashield_agent_audit.log")
+            ),
             "policy_manager":   PolicyManager(
-                rules_path=str(self.default_rules_path),
-                allowlist_path=str(self.allowlist_path)
+                rules_path=str(base_dir / "rules" / "default_rules.yaml"),
+                allowlist_path=str(base_dir / "rules" / "allowlist.yaml"),
             ),
             "gemini_api_key":   os.environ.get("GEMINI_API_KEY", ""),
-            "allowlist_path":   str(self.allowlist_path),
-            "custom_rules_path": "",
-            "smtp_config":      {},
-            "is_scanning":      False,
             "root_window":      self,
-            "role":             role,
-            "user_email":       user_email,
+            "reporting_client": None,   # injected by main.py after login
         }
 
-        self.configure_styles()
-        self._build_header(is_admin)
-        self.create_layout(is_admin)
+        self._threat_rows   = []
+        self._scan_running  = threading.Event()
+        self._agent_online  = True   # updated by set_agent_status()
+        self._risk_score    = None   # fetched from server in background
+
+        self.title("DataShield  —  Protected")
+        W, H = 500, 680
+        sw, sh = self.winfo_screenwidth(), self.winfo_screenheight()
+        self.geometry(f"{W}x{H}+{sw - W - 40}+{(sh - H) // 2}")
+        self.resizable(False, False)
+        self.configure(bg=BG)
+
+        os.makedirs(base_dir / "output", exist_ok=True)
+
+        # Feature 2: load history — prefer PostgreSQL, fall back to SQLite cache
+        # The actual fetch runs in background after the window is visible.
+        # Pre-populate from the local cache immediately (fastest startup).
+        cached = load_recent(limit=80)
+        self._threat_rows = cached   # may be replaced by server data in 2s
+
+        self._build()
         self.protocol("WM_DELETE_WINDOW", self.on_close)
 
-    def _build_header(self, is_admin: bool):
-        """Slim status bar showing logged-in user and role badge."""
-        bar = tk.Frame(self, bg="#0f172a", height=36)
-        bar.pack(fill="x", side="top")
-        bar.pack_propagate(False)
+        # Kick off server history fetch after window renders
+        if self.server_url and self.user_email:
+            self.after(2000, self._fetch_history_from_server)
 
-        badge_color = "#6366f1" if is_admin else "#0ea5e9"
-        badge_text  = "ADMIN" if is_admin else "EMPLOYEE"
+    # ─────────────────────────────────────────────────────────────────────────
+    #  Build UI
+    # ─────────────────────────────────────────────────────────────────────────
+    def _build(self):
+        self._build_header()
+        self._build_monitor_strip()
+        self._build_risk_score_bar()   # Feature 1
+        self._build_scan_button()
+        self._build_threat_feed()
 
-        tk.Label(bar, text="DataShield Enterprise", bg="#0f172a",
-                 fg="#6366f1", font=("Segoe UI", 11, "bold")).pack(side="left", padx=14)
-        tk.Label(bar, text=f"  {badge_text}  ", bg=badge_color, fg="white",
-                 font=("Segoe UI", 8, "bold")).pack(side="left", pady=8)
-        name_lbl = self.user_name or self.user_email
-        tk.Label(bar, text=name_lbl, bg="#0f172a",
-                 fg="#94a3b8", font=("Segoe UI", 9)).pack(side="left", padx=10)
+    # ── Header ────────────────────────────────────────────────────────────────
+    def _build_header(self):
+        hdr = tk.Frame(self, bg=BG_CARD)
+        hdr.pack(fill="x")
 
-        if not is_admin:
-            tk.Label(bar,
-                     text="USB, Clipboard & SMTP monitors running automatically in background",
-                     bg="#0f172a", fg="#475569", font=("Segoe UI", 8)).pack(side="right", padx=14)
+        inner = tk.Frame(hdr, bg=BG_CARD)
+        inner.pack(fill="x", padx=16, pady=12)
 
-        tk.Frame(self, height=1, bg="#1e293b").pack(fill="x")
+        # Brand
+        brand = tk.Frame(inner, bg=BG_CARD)
+        brand.pack(side="left")
+        tk.Label(brand, text="  DS  ", bg=ACCENT, fg="white",
+                 font=("Segoe UI", 12, "bold")).pack(side="left")
+        names = tk.Frame(brand, bg=BG_CARD)
+        names.pack(side="left", padx=8)
+        tk.Label(names, text="DataShield", bg=BG_CARD, fg=ACCENT,
+                 font=("Segoe UI", 13, "bold")).pack(anchor="w")
+        tk.Label(names, text="Employee Portal", bg=BG_CARD, fg=TEXT_MUT,
+                 font=("Segoe UI", 8)).pack(anchor="w")
 
+        # Right side: user + logout
+        right = tk.Frame(inner, bg=BG_CARD)
+        right.pack(side="right")
 
-
-    def configure_styles(self):
-        # Apply Clam theme as a baseline for styling
-        self.style = ttk.Style()
-        self.style.theme_use("clam")
-
-        # Color Palette Definition (Slate-900 Dark Mode)
-        self.bg_dark = "#0f172a"      # slate-900
-        self.bg_card = "#1e293b"      # slate-800
-        self.fg_light = "#f8fafc"     # slate-50
-        self.fg_muted = "#94a3b8"     # slate-400
-        self.color_blue = "#3b82f6"   # primary blue
-        self.color_purple = "#8b5cf6" # secondary violet
-        
-        self.configure(background=self.bg_dark)
-
-        # Style bindings
-        self.style.configure(".", background=self.bg_dark, foreground=self.fg_light, font=("Segoe UI", 10))
-        self.style.configure("TLabel", background=self.bg_dark, foreground=self.fg_light)
-        self.style.configure("TFrame", background=self.bg_dark)
-        
-        # Entry Style
-        self.style.configure("TEntry", fieldbackground=self.bg_card, foreground=self.fg_light, bordercolor=self.bg_card)
-        
-        # Button Styles
-        self.style.configure("TButton", background=self.color_blue, foreground=self.fg_light, borderwidth=0, padding=6)
-        self.style.map("TButton", background=[("active", self.color_purple)])
-        
-        # Tab Notebook Styles
-        self.style.configure("TNotebook", background=self.bg_dark, borderwidth=0)
-        self.style.configure("TNotebook.Tab", background=self.bg_card, foreground=self.fg_light, padding=[15, 6], font=("Segoe UI", 10, "bold"))
-        self.style.map("TNotebook.Tab", background=[("selected", self.bg_dark)], foreground=[("selected", self.fg_light)])
-
-        # Treeview (Risk Table) Styles
-        self.style.configure("Treeview", background=self.bg_card, fieldbackground=self.bg_card, foreground=self.fg_light, rowheight=24)
-        self.style.map("Treeview", background=[("selected", self.color_blue)], foreground=[("selected", self.fg_light)])
-        self.style.configure("Heading", background=self.bg_card, foreground=self.fg_light, font=("Segoe UI", 10, "bold"))
-
-        # LabelFrame customization
-        self.style.configure("TLabelframe", background=self.bg_dark, bordercolor=self.bg_card, padding=10)
-        self.style.configure("TLabelframe.Label", background=self.bg_dark, foreground=self.color_blue, font=("Segoe UI", 10, "bold"))
-
-    def create_layout(self, is_admin: bool = True):
-        self.notebook = ttk.Notebook(self)
-        self.notebook.pack(fill="both", expand=True, padx=5, pady=5)
-
-        self.scan_tab    = ScanTab(self.notebook, self.state)
-        self.results_tab = ResultsTab(self.notebook, self.state)
-
-        # All users get Scan + Detections
-        self.notebook.add(self.scan_tab,    text="  Scan Files  ")
-        self.notebook.add(self.results_tab, text="  Detections  ")
-
-        # Admin-only tabs
-        if is_admin:
-            self.comms_tab    = CommsTab(self.notebook, self.state)
-            self.report_tab   = ReportTab(self.notebook, self.state)
-            self.settings_tab = self.create_settings_tab()
-            self.notebook.add(self.comms_tab,    text="  Comms DLP  ")
-            self.notebook.add(self.report_tab,   text="  Reports  ")
-            self.notebook.add(self.settings_tab, text="  Configuration  ")
-
-        self.notebook.bind("<<NotebookTabChanged>>", self.on_tab_changed)
-
-
-    def toggle_comms_daemons(self):
-        """Starts/stops background monitor daemons depending on Settings variables."""
-        enable_smtp = self.state.get("enable_smtp_monitor", False)
-        enable_clip = self.state.get("enable_clipboard_monitor", False)
-        enable_usb = self.state.get("enable_usb_monitor", False)
-        enable_webmail = self.state.get("enable_webmail_monitor", False)
-        
-        # Lazy imports to prevent circular dependencies
-        from comms.smtp_proxy import DataShieldSMTPProxy
-        from comms.clipboard_monitor import ClipboardMonitor
-        from comms.usb_watcher import USBWatcher
-        from comms.http_server import DataShieldHTTPServer
-        
-        # SMTP Intercept Proxy Control
-        if enable_smtp:
-            if not hasattr(self, "smtp_proxy_obj") or not self.smtp_proxy_obj:
-                try:
-                    self.smtp_proxy_obj = DataShieldSMTPProxy(self.state, on_event_callback=self.comms_tab.log_event)
-                    self.smtp_proxy_obj.start()
-                    print("SMTP Intercept Proxy active on port 1025.")
-                except Exception as e:
-                    self.smtp_proxy_obj = None
-                    self.state["enable_smtp_monitor"] = False
-                    self.comms_tab.smtp_chk_var.set(False)
-                    messagebox.showerror("SMTP Proxy Error", f"Failed to start SMTP proxy on port 1025. The port might be in use by another application.\nError: {e}")
-        else:
-            if hasattr(self, "smtp_proxy_obj") and self.smtp_proxy_obj:
-                self.smtp_proxy_obj.stop()
-                self.smtp_proxy_obj = None
-                print("SMTP Intercept Proxy deactivated.")
-                
-        # Clipboard Monitor control
-        if enable_clip:
-            if not hasattr(self, "clip_monitor_obj") or not self.clip_monitor_obj:
-                self.clip_monitor_obj = ClipboardMonitor(self.state, on_finding_callback=self.comms_tab.log_event)
-                self.clip_monitor_obj.start()
-                print("Clipboard Monitor active.")
-        else:
-            if hasattr(self, "clip_monitor_obj") and self.clip_monitor_obj:
-                self.clip_monitor_obj.stop()
-                self.clip_monitor_obj = None
-                print("Clipboard Monitor deactivated.")
-                
-        # USB mount scanner control
-        if enable_usb:
-            if not hasattr(self, "usb_watcher_obj") or not self.usb_watcher_obj:
-                def handle_usb_report(report):
-                    # Inject findings into results tab so they show up in main lists
-                    results = self.state.get("scan_results", [])
-                    for finding in report.all_findings:
-                        results = [r for r in results if r["file_path"] != finding["file_path"]]
-                        results.append(finding)
-                    self.state["scan_results"] = results
-                    self.results_tab.refresh_results()
-                    
-                self.usb_watcher_obj = USBWatcher(
-                    self.state, 
-                    on_report_callback=handle_usb_report,
-                    on_event_callback=self.comms_tab.log_event
-                )
-                self.usb_watcher_obj.start()
-                print("USB Watcher active.")
-        else:
-            if hasattr(self, "usb_watcher_obj") and self.usb_watcher_obj:
-                self.usb_watcher_obj.stop()
-                self.usb_watcher_obj = None
-                print("USB Watcher deactivated.")
-
-        # Webmail Scan HTTP Server control
-        if enable_webmail:
-            if not hasattr(self, "webmail_server_obj") or not self.webmail_server_obj:
-                try:
-                    self.webmail_server_obj = DataShieldHTTPServer(self.state, on_event_callback=self.comms_tab.log_event)
-                    self.webmail_server_obj.start()
-                    print("Webmail scan HTTP API active on port 5000.")
-                except Exception as e:
-                    self.webmail_server_obj = None
-                    self.state["enable_webmail_monitor"] = False
-                    self.comms_tab.webmail_chk_var.set(False)
-                    messagebox.showerror("Webmail API Error", f"Failed to start HTTP scan API on port 5000. The port might be in use by another application.\nError: {e}")
-        else:
-            if hasattr(self, "webmail_server_obj") and self.webmail_server_obj:
-                self.webmail_server_obj.stop()
-                self.webmail_server_obj = None
-                print("Webmail scan HTTP API deactivated.")
-
-    def on_close(self):
-        """Stops all running background threads before destroying GUI to prevent hangs."""
-        print("Stopping background daemons...")
-        self.state["enable_smtp_monitor"] = False
-        self.state["enable_clipboard_monitor"] = False
-        self.state["enable_usb_monitor"] = False
-        self.state["enable_webmail_monitor"] = False
-        if hasattr(self, "comms_tab"):
-            self.toggle_comms_daemons()
-        self.destroy()
-
-    def on_tab_changed(self, event):
-        if hasattr(self, "report_tab"):
-            selected_index = self.notebook.index("current")
-            report_index = self.notebook.index(self.report_tab)
-            if selected_index == report_index:
-                self.report_tab.update_report_stats()
-
-
-    def create_settings_tab(self) -> ttk.Frame:
-        """Builds settings panel for API key, allowlist, SMTP, and custom rules."""
-        tab = ttk.Frame(self.notebook)
-        
-        tab.columnconfigure(0, weight=1)
-        tab.columnconfigure(1, weight=1)
-        
-        # --- Left Column Settings ---
-        left_frame = ttk.Frame(tab)
-        left_frame.grid(row=0, column=0, padx=15, pady=10, sticky="nsew")
-        left_frame.columnconfigure(0, weight=1)
-
-        # 1. API Credentials Frame
-        api_frame = ttk.LabelFrame(left_frame, text=" Gemini API Settings ")
-        api_frame.grid(row=0, column=0, pady=5, sticky="ew")
-        api_frame.columnconfigure(1, weight=1)
-
-        ttk.Label(api_frame, text="Gemini API Key:").grid(row=0, column=0, padx=5, pady=10, sticky="w")
-        self.api_key_var = tk.StringVar(value=self.state["gemini_api_key"])
-        self.entry_api = ttk.Entry(api_frame, textvariable=self.api_key_var, show="*")
-        self.entry_api.grid(row=0, column=1, padx=5, pady=10, sticky="ew")
-
-        # 2. Custom Rules Selection Frame
-        rules_frame = ttk.LabelFrame(left_frame, text=" Custom Rules YAML ")
-        rules_frame.grid(row=1, column=0, pady=10, sticky="ew")
-        rules_frame.columnconfigure(1, weight=1)
-
-        self.custom_rules_var = tk.StringVar(value="")
-        self.entry_rules = ttk.Entry(rules_frame, textvariable=self.custom_rules_var, state="readonly")
-        self.entry_rules.grid(row=0, column=0, columnspan=2, padx=5, pady=10, sticky="ew")
-        
-        btn_rules_picker = ttk.Button(rules_frame, text="Load Rules...", command=self.load_custom_rules)
-        btn_rules_picker.grid(row=0, column=2, padx=5, pady=10, sticky="e")
-
-        # 3. SMTP Server settings
-        smtp_frame = ttk.LabelFrame(left_frame, text=" SMTP Email Alert Alerts ")
-        smtp_frame.grid(row=2, column=0, pady=5, sticky="ew")
-        smtp_frame.columnconfigure(1, weight=1)
-
-        # Fields: host, port, sender, recipient
-        ttk.Label(smtp_frame, text="SMTP Host:").grid(row=0, column=0, padx=5, pady=5, sticky="w")
-        self.smtp_host_var = tk.StringVar()
-        ttk.Entry(smtp_frame, textvariable=self.smtp_host_var).grid(row=0, column=1, padx=5, pady=5, sticky="ew")
-
-        ttk.Label(smtp_frame, text="SMTP Port:").grid(row=1, column=0, padx=5, pady=5, sticky="w")
-        self.smtp_port_var = tk.StringVar(value="25")
-        ttk.Entry(smtp_frame, textvariable=self.smtp_port_var).grid(row=1, column=1, padx=5, pady=5, sticky="ew")
-
-        ttk.Label(smtp_frame, text="Sender email:").grid(row=2, column=0, padx=5, pady=5, sticky="w")
-        self.smtp_sender_var = tk.StringVar(value="datashield-alerts@security.local")
-        ttk.Entry(smtp_frame, textvariable=self.smtp_sender_var).grid(row=2, column=1, padx=5, pady=5, sticky="ew")
-
-        ttk.Label(smtp_frame, text="Recipient:").grid(row=3, column=0, padx=5, pady=5, sticky="w")
-        self.smtp_recip_var = tk.StringVar()
-        ttk.Entry(smtp_frame, textvariable=self.smtp_recip_var).grid(row=3, column=1, padx=5, pady=5, sticky="ew")
-
-        ttk.Label(smtp_frame, text="Username:").grid(row=4, column=0, padx=5, pady=5, sticky="w")
-        self.smtp_user_var = tk.StringVar()
-        ttk.Entry(smtp_frame, textvariable=self.smtp_user_var).grid(row=4, column=1, padx=5, pady=5, sticky="ew")
-
-        ttk.Label(smtp_frame, text="Password:").grid(row=5, column=0, padx=5, pady=5, sticky="w")
-        self.smtp_pass_var = tk.StringVar()
-        ttk.Entry(smtp_frame, textvariable=self.smtp_pass_var, show="*").grid(row=5, column=1, padx=5, pady=5, sticky="ew")
-
-        # --- Right Column Settings (Allowlist Editor) ---
-        right_frame = ttk.LabelFrame(tab, text=" Allowlist Suppression (One rule/value per line) ")
-        right_frame.grid(row=0, column=1, rowspan=4, padx=15, pady=15, sticky="nsew")
-        right_frame.columnconfigure(0, weight=1)
-        right_frame.rowconfigure(0, weight=1)
-
-        self.allowlist_textbox = tk.Text(
-            right_frame, background="#030712", foreground="#e2e8f0", 
-            insertbackground="white", font=("Consolas", 10)
+        # Logout button
+        logout_btn = tk.Label(
+            right, text="Logout", bg=BG_ROW, fg=TEXT_SEC,
+            font=("Segoe UI", 8, "bold"), padx=10, pady=4, cursor="hand2"
         )
-        self.allowlist_textbox.grid(row=0, column=0, sticky="nsew")
-        
-        # Load existing allowlist values into text editor
-        self.refresh_allowlist_editor()
+        logout_btn.pack(side="right", padx=(8, 0))
+        logout_btn.bind("<Button-1>", lambda e: self._do_logout())
+        logout_btn.bind("<Enter>", lambda e: logout_btn.configure(fg=DANGER))
+        logout_btn.bind("<Leave>", lambda e: logout_btn.configure(fg=TEXT_SEC))
 
-        # Save Button at the bottom
-        btn_save = ttk.Button(tab, text="Apply & Save Settings", command=self.save_settings)
-        btn_save.grid(row=3, column=0, columnspan=2, pady=15)
+        # User info
+        user_box = tk.Frame(right, bg=BG_ROW, padx=10, pady=4)
+        user_box.pack(side="right")
+        tk.Label(user_box, text=self.user_name, bg=BG_ROW, fg=TEXT,
+                 font=("Segoe UI", 9, "bold")).pack(anchor="e")
+        tk.Label(user_box, text=self.user_email, bg=BG_ROW, fg=TEXT_MUT,
+                 font=("Segoe UI", 7)).pack(anchor="e")
 
-        return tab
+        tk.Frame(self, height=1, bg=BORDER).pack(fill="x")
 
-    def load_custom_rules(self):
-        rules_file = filedialog.askopenfilename(
-            filetypes=[("YAML Files", "*.yaml;*.yml"), ("All Files", "*.*")],
-            title="Load Custom DLP Rules"
+        # Agent connection status bar
+        self._status_bar = tk.Frame(self, bg=OK, pady=3)
+        self._status_bar.pack(fill="x")
+        self._status_label = tk.Label(
+            self._status_bar,
+            text="● Agent connected  —  events reported to security dashboard",
+            bg=OK, fg="#052e16",
+            font=("Segoe UI", 8, "bold")
         )
-        if rules_file:
-            self.custom_rules_var.set(rules_file)
-            self.state["custom_rules_path"] = rules_file
-            messagebox.showinfo("Rules Configured", f"Loaded custom rules from:\n{os.path.basename(rules_file)}")
+        self._status_label.pack()
 
-    def refresh_allowlist_editor(self):
-        self.allowlist_textbox.delete("1.0", "end")
-        if os.path.exists(self.allowlist_path):
+    # ── Monitor pills ─────────────────────────────────────────────────────────
+    def _build_monitor_strip(self):
+        outer = tk.Frame(self, bg=BG, pady=10)
+        outer.pack(fill="x", padx=16)
+
+        tk.Label(outer, text="ACTIVE MONITORS", bg=BG, fg=TEXT_MUT,
+                 font=("Segoe UI", 7, "bold")).pack(anchor="w", pady=(0, 6))
+
+        row = tk.Frame(outer, bg=BG)
+        row.pack(fill="x")
+
+        channel_defs = [
+            ("clipboard", "Clipboard"),
+            ("usb",       "USB Drive"),
+            ("webmail",   "Webmail"),
+            ("file_scan", "File Scan"),
+            ("cloud",     "Cloud DLP"),
+        ]
+        self._monitor_pills = {}
+        for key, label in channel_defs:
+            active = self.monitors.get(key, False)
+            pill = tk.Frame(row, bg=(OK if active else BG_ROW), padx=8, pady=3)
+            pill.pack(side="left", padx=(0, 4))
+            lbl = tk.Label(pill, text=label,
+                           bg=(OK if active else BG_ROW),
+                           fg="white" if active else TEXT_MUT,
+                           font=("Segoe UI", 8, "bold"))
+            lbl.pack()
+            self._monitor_pills[key] = (pill, lbl)
+
+        tk.Frame(self, height=1, bg=BORDER).pack(fill="x")
+
+    def update_monitor_pills(self, monitors: dict):
+        """Dynamically updates the color and text of active/inactive monitor pills."""
+        def _update():
+            self.monitors = monitors
+            for key, (pill, lbl) in self._monitor_pills.items():
+                active = monitors.get(key, False)
+                pill.configure(bg=(OK if active else BG_ROW))
+                lbl.configure(bg=(OK if active else BG_ROW), fg="white" if active else TEXT_MUT)
+        self.after(0, _update)
+
+    # ── Risk score bar (Feature 1) ─────────────────────────────────────────────
+    def _build_risk_score_bar(self):
+        """Shows the employee's own risk score fetched from the server."""
+        self._risk_bar = tk.Frame(self, bg=BG, pady=8)
+        self._risk_bar.pack(fill="x", padx=16)
+
+        row = tk.Frame(self._risk_bar, bg=BG)
+        row.pack(fill="x")
+
+        tk.Label(row, text="YOUR RISK SCORE", bg=BG, fg=TEXT_MUT,
+                 font=("Segoe UI", 7, "bold")).pack(side="left")
+
+        self._risk_score_var  = tk.StringVar(value="Loading…")
+        self._risk_score_lbl  = tk.Label(
+            row, textvariable=self._risk_score_var,
+            bg=BG, fg=TEXT_MUT, font=("Segoe UI", 9, "bold")
+        )
+        self._risk_score_lbl.pack(side="left", padx=8)
+
+        self._risk_flag_var = tk.StringVar(value="")
+        self._risk_flag_lbl = tk.Label(
+            row, textvariable=self._risk_flag_var,
+            bg=BG, fg=DANGER, font=("Segoe UI", 8, "bold")
+        )
+        self._risk_flag_lbl.pack(side="left")
+
+        tk.Label(row, text="(30-day rolling  ·  refreshes every 5 min)",
+                 bg=BG, fg=TEXT_MUT, font=("Segoe UI", 7)).pack(side="right")
+
+        tk.Frame(self, height=1, bg=BORDER).pack(fill="x")
+
+        # Fetch in background immediately + schedule refresh
+        self.after(1500, self._refresh_risk_score)
+
+    def _refresh_risk_score(self):
+        """Background fetch of employee risk score from server."""
+        def _fetch():
+            score_text = "Unavailable"
+            color      = TEXT_MUT
+            flag_text  = ""
+            if self.server_url and self.user_email:
+                try:
+                    import httpx
+                    resp = httpx.get(
+                        f"{self.server_url}/api/auth/me/risk",
+                        params={"email": self.user_email},
+                        timeout=5,
+                    )
+                    if resp.status_code == 200:
+                        data  = resp.json()
+                        score = float(data.get("risk_score", 0))
+                        score_text = f"{score:.1f}"
+                        color = (
+                            DANGER if score >= 10
+                            else WARN if score >= 5
+                            else OK
+                        )
+                        if data.get("is_flagged"):
+                            flag_text = "  ⚠ FLAGGED"
+                    elif resp.status_code == 404:
+                        score_text = "No data yet"
+                except Exception:
+                    score_text = "Offline"
+            def _update():
+                self._risk_score_var.set(score_text)
+                self._risk_score_lbl.configure(fg=color)
+                self._risk_flag_var.set(flag_text)
+            self.after(0, _update)
+        threading.Thread(target=_fetch, daemon=True).start()
+        # Schedule next refresh in 5 minutes
+        self.after(300_000, self._refresh_risk_score)
+
+    def _fetch_history_from_server(self):
+        """
+        Feature 2 — PostgreSQL-first history load.
+        Runs in background thread 2 seconds after window opens.
+        On success: replaces feed with server data + refreshes local cache.
+        On failure: silently keeps the SQLite fallback already loaded.
+        """
+        def _fetch():
             try:
-                with open(self.allowlist_path, "r", encoding="utf-8") as f:
-                    data = yaml.safe_load(f)
-                    if data and "allowlist" in data:
-                        for item in data["allowlist"]:
-                            self.allowlist_textbox.insert("end", f"{item}\n")
-            except Exception as e:
-                print(f"Warning: Failed to load allowlist to editor: {e}")
+                import httpx
+                resp = httpx.get(
+                    f"{self.server_url}/api/events/my-feed",
+                    params={"email": self.user_email, "limit": 80},
+                    timeout=6,
+                )
+                if resp.status_code == 200:
+                    events = resp.json()   # list of push_threat-compatible dicts
+                    if events:
+                        # Update SQLite cache with authoritative data
+                        threading.Thread(
+                            target=cache_events, args=(events,), daemon=True
+                        ).start()
+                        # Replace the in-memory feed on the UI thread
+                        self.after(0, lambda evts=events: self._replace_feed(evts))
+            except Exception:
+                pass   # Server offline — keep SQLite fallback silently
 
-    def save_settings(self):
-        # 1. Save API Key in memory
-        self.state["gemini_api_key"] = self.api_key_var.get().strip()
+        threading.Thread(target=_fetch, daemon=True).start()
 
-        # 2. Parse and save allowlist back to yaml
-        allowlist_raw = self.allowlist_textbox.get("1.0", "end").splitlines()
-        allowlist_items = [line.strip() for line in allowlist_raw if line.strip()]
+    def _replace_feed(self, events: list):
+        """Replace _threat_rows with freshly fetched server events and redraw."""
+        self._threat_rows = events
+        self._refresh_feed()
 
-        try:
-            os.makedirs(os.path.dirname(self.allowlist_path), exist_ok=True)
-            with open(self.allowlist_path, "w", encoding="utf-8") as f:
-                yaml.dump({"allowlist": allowlist_items}, f, default_flow_style=False)
-            
-            # Reload policies
-            self.state["policy_manager"].load_allowlist(str(self.allowlist_path))
-        except Exception as e:
-            messagebox.showerror("Save Error", f"Failed to save allowlist to disk: {e}")
+    # ── Feature 5: Override approval / denial notifications ───────────────────
+    def _start_override_poll(self):
+        """
+        Start polling /api/overrides/my-notifications every 60s.
+        Called once after successful login.
+        """
+        self._poll_overrides()
+
+    def _poll_overrides(self):
+        """Check server for any new override decisions and notify the employee."""
+        employee_id = self.state.get("employee_id", "")
+        if not employee_id or not self.server_url:
+            return   # not logged in or no server — stop polling silently
+
+        def _fetch():
+            try:
+                import httpx
+                resp = httpx.get(
+                    f"{self.server_url}/api/overrides/my-notifications",
+                    params={"employee_id": employee_id},
+                    timeout=6,
+                )
+                if resp.status_code == 200:
+                    notifications = resp.json()
+                    for notif in notifications:
+                        # Show each notification on the main thread
+                        self.after(0, lambda n=notif: self._show_override_notification(n))
+            except Exception:
+                pass   # server offline — try again next cycle
+
+        threading.Thread(target=_fetch, daemon=True).start()
+        # Schedule next poll in 60 seconds
+        self.after(60_000, self._poll_overrides)
+
+    def _show_override_notification(self, notif: dict):
+        """Show a native Tkinter popup telling the employee their override result."""
+        status     = notif.get("status", "")
+        admin_note = notif.get("admin_note", "").strip()
+        channel    = notif.get("event_channel", "")
+        pattern    = notif.get("pattern", "")
+
+        approved = (status == "APPROVED")
+        color    = OK if approved else DANGER
+        icon     = "✅" if approved else "❌"
+        title    = "Override Approved" if approved else "Override Denied"
+
+        dialog = tk.Toplevel(self)
+        dialog.title(title)
+        dialog.configure(bg=BG)
+        dialog.resizable(False, False)
+        dw, dh = 420, 230
+        sw, sh = self.winfo_screenwidth(), self.winfo_screenheight()
+        dialog.geometry(f"{dw}x{dh}+{(sw - dw) // 2}+{(sh - dh) // 2}")
+        dialog.grab_set()
+        dialog.lift()
+        dialog.focus_force()
+
+        # Coloured header bar
+        header = tk.Frame(dialog, bg=color, pady=10, padx=14)
+        header.pack(fill="x")
+        tk.Label(
+            header,
+            text=f"{icon}  {title}",
+            bg=color, fg="#0f172a" if approved else "white",
+            font=("Segoe UI", 11, "bold"),
+        ).pack(anchor="w")
+
+        # Context (channel + pattern)
+        if channel or pattern:
+            ctx = f"{channel}  ·  {pattern}".strip(" · ")
+            tk.Label(
+                dialog, text=ctx,
+                bg=BG, fg=TEXT_MUT, font=("Segoe UI", 8),
+            ).pack(anchor="w", padx=14, pady=(8, 0))
+
+        # Main message
+        if approved:
+            msg = "Your override request has been approved by your admin.\nYou may now proceed with the transfer."
+        else:
+            msg = "Your override request was denied by your admin.\nPlease contact your manager if you believe this is an error."
+
+        tk.Label(
+            dialog, text=msg,
+            bg=BG, fg=TEXT,
+            font=("Segoe UI", 9),
+            wraplength=390, justify="left",
+        ).pack(anchor="w", padx=14, pady=(6, 0))
+
+        # Admin note (if present)
+        if admin_note:
+            note_frame = tk.Frame(dialog, bg="#1e293b", padx=10, pady=8)
+            note_frame.pack(fill="x", padx=14, pady=(8, 0))
+            tk.Label(
+                note_frame, text="Admin note:",
+                bg="#1e293b", fg=TEXT_MUT, font=("Segoe UI", 7, "bold"),
+            ).pack(anchor="w")
+            tk.Label(
+                note_frame, text=admin_note,
+                bg="#1e293b", fg=TEXT_SEC, font=("Segoe UI", 8),
+                wraplength=370, justify="left",
+            ).pack(anchor="w", pady=(2, 0))
+
+        # OK button
+        btn_row = tk.Frame(dialog, bg=BG)
+        btn_row.pack(fill="x", padx=14, pady=(10, 14))
+        ok = tk.Label(
+            btn_row, text="OK",
+            bg=color, fg="#0f172a" if approved else "white",
+            font=("Segoe UI", 9, "bold"),
+            padx=20, pady=6, cursor="hand2",
+        )
+        ok.pack(side="right")
+        ok.bind("<Button-1>", lambda e: dialog.destroy())
+
+    def _build_scan_button(self):
+        section = tk.Frame(self, bg=BG, pady=14)
+        section.pack(fill="x", padx=16)
+
+        tk.Label(section, text="Check a folder for sensitive data before sending",
+                 bg=BG, fg=TEXT_SEC, font=("Segoe UI", 9)).pack(anchor="w", pady=(0, 8))
+
+        btn_outer = tk.Frame(section, bg=ACCENT, cursor="hand2")
+        btn_outer.pack(fill="x")
+
+        self._scan_lbl = tk.Label(
+            btn_outer,
+            text="📂   Browse & Scan Folder",
+            bg=ACCENT, fg="white",
+            font=("Segoe UI", 12, "bold"),
+            pady=14, cursor="hand2",
+        )
+        self._scan_lbl.pack(fill="x")
+
+        def _enter(e): btn_outer.configure(bg="#818cf8"); self._scan_lbl.configure(bg="#818cf8")
+        def _leave(e): btn_outer.configure(bg=ACCENT);   self._scan_lbl.configure(bg=ACCENT)
+
+        for w in (btn_outer, self._scan_lbl):
+            w.bind("<Button-1>", lambda e: self.trigger_scan_folder())
+            w.bind("<Enter>", _enter)
+            w.bind("<Leave>", _leave)
+
+        self._scan_status = tk.Label(
+            section, text="", bg=BG, fg=TEXT_MUT, font=("Segoe UI", 8)
+        )
+        self._scan_status.pack(anchor="w", pady=(5, 0))
+
+        tk.Frame(self, height=1, bg=BORDER).pack(fill="x")
+
+    # ── Threat feed ───────────────────────────────────────────────────────────
+    def _build_threat_feed(self):
+        hdr = tk.Frame(self, bg=BG)
+        hdr.pack(fill="x", padx=16, pady=(10, 4))
+
+        self._feed_title = tk.StringVar(value="Recent Threats")
+        tk.Label(hdr, textvariable=self._feed_title, bg=BG, fg=TEXT_SEC,
+                 font=("Segoe UI", 9, "bold")).pack(side="left")
+        tk.Label(hdr, text="This session", bg=BG, fg=TEXT_MUT,
+                 font=("Segoe UI", 8)).pack(side="right")
+
+        container = tk.Frame(self, bg=BG)
+        container.pack(fill="both", expand=True, padx=14, pady=(0, 10))
+
+        canvas = tk.Canvas(container, bg=BG, highlightthickness=0)
+        sb = tk.Scrollbar(container, orient="vertical", command=canvas.yview)
+        canvas.configure(yscrollcommand=sb.set)
+        sb.pack(side="right", fill="y")
+        canvas.pack(side="left", fill="both", expand=True)
+
+        self._feed_frame  = tk.Frame(canvas, bg=BG)
+        self._feed_win    = canvas.create_window((0, 0), window=self._feed_frame, anchor="nw")
+        self._canvas      = canvas
+
+        canvas.bind("<Configure>",
+                    lambda e: canvas.itemconfig(self._feed_win, width=e.width))
+        self._feed_frame.bind("<Configure>",
+                    lambda e: canvas.configure(scrollregion=canvas.bbox("all")))
+
+        # Mouse-wheel scroll
+        canvas.bind("<MouseWheel>",
+                    lambda e: canvas.yview_scroll(-1 * (e.delta // 120), "units"))
+
+        self._show_empty_state()
+
+    def _show_empty_state(self):
+        for w in self._feed_frame.winfo_children():
+            w.destroy()
+        tk.Label(self._feed_frame, text="✅", bg=BG, fg=OK,
+                 font=("Segoe UI", 26)).pack(pady=(24, 6))
+        tk.Label(self._feed_frame, text="No threats detected this session",
+                 bg=BG, fg=TEXT_SEC, font=("Segoe UI", 11)).pack()
+        tk.Label(self._feed_frame, text="All monitored channels are clean",
+                 bg=BG, fg=TEXT_MUT, font=("Segoe UI", 9)).pack(pady=(3, 0))
+
+    # ─────────────────────────────────────────────────────────────────────────
+    #  Public API — called from main.py / background monitors
+    # ─────────────────────────────────────────────────────────────────────────
+    def push_threat(self, channel: str, action: str, detail: str,
+                    risk_level: str = "HIGH", pattern: str = "",
+                    match=None, file_path: str = ""):
+        """
+        Thread-safe. Add a detection to the feed.
+        Also saves to local SQLite (Feature 2).
+        match  — the scanner.Match namedtuple (optional) used for AI explanation
+        file_path — full path of the scanned file (optional, for AI explainer)
+        """
+        entry = {
+            "time":       datetime.now().strftime("%H:%M:%S"),
+            "channel":    channel,
+            "action":     action,
+            "detail":     detail,
+            "risk_level": risk_level,
+            "pattern":    pattern,
+            "match":      match,
+            "file_path":  file_path,
+            "ai_text":    None,   # populated lazily on first expand
+        }
+        self._threat_rows.insert(0, entry)
+        # Feature 2: persist to local SQLite
+        threading.Thread(
+            target=save_event, args=(entry,), daemon=True
+        ).start()
+        self.after(0, self._refresh_feed)
+
+    def set_agent_status(self, online: bool):
+        """Update the connection status bar. Thread-safe via after()."""
+        self._agent_online = online
+        self.after(0, self._update_status_bar)
+
+    def set_status_text(self, text: str, color=None):
+        """Update the scan status label on the main window. Thread-safe."""
+        fg = color if color is not None else TEXT_MUT
+        self.after(0, lambda: self._scan_status.configure(text=text, fg=fg))
+
+    def _update_status_bar(self):
+        if self._agent_online:
+            self._status_bar.configure(bg=OK)
+            self._status_label.configure(
+                bg=OK, fg="#052e16",
+                text="● Agent connected  —  events reported to security dashboard"
+            )
+        else:
+            self._status_bar.configure(bg=DANGER)
+            self._status_label.configure(
+                bg=DANGER, fg="white",
+                text="● Agent offline  —  events queued locally until server reconnects"
+            )
+
+    # ─────────────────────────────────────────────────────────────────────────
+    #  Feed rendering
+    # ─────────────────────────────────────────────────────────────────────────
+    def _refresh_feed(self):
+        for w in self._feed_frame.winfo_children():
+            w.destroy()
+
+        count = len(self._threat_rows)
+        self._feed_title.set(
+            f"Recent Threats  ({count})" if count else "Recent Threats"
+        )
+
+        if not self._threat_rows:
+            self._show_empty_state()
             return
 
-        # 3. Save SMTP Server configs
-        host = self.smtp_host_var.get().strip()
-        port = self.smtp_port_var.get().strip()
-        sender = self.smtp_sender_var.get().strip()
-        recip = self.smtp_recip_var.get().strip()
-        username = self.smtp_user_var.get().strip()
-        password = self.smtp_pass_var.get().strip()
+        for entry in self._threat_rows[:50]:
+            self._add_row(entry)
 
-        if host or recip:
-            self.state["smtp_config"] = {
-                "host": host,
-                "port": port,
-                "sender": sender,
-                "recipient": recip,
-                "username": username,
-                "password": password
-            }
-        else:
-            self.state["smtp_config"] = {}
+        self._canvas.yview_moveto(0)   # scroll to top (newest)
 
-        self.state["audit_logger"].log("SETTINGS_UPDATED", {
-            "custom_rules": os.path.basename(self.state["custom_rules_path"]) if self.state["custom_rules_path"] else "Default",
-            "allowlist_entries_count": len(allowlist_items),
-            "email_alerts_configured": bool(self.state["smtp_config"])
-        })
+    def _add_row(self, entry: dict):
+        rl     = entry.get("risk_level", "HIGH")
+        color  = RISK_COLOR.get(rl, DANGER)
+        action = entry.get("action", "")
 
-        messagebox.showinfo("Settings Saved", "All configurations applied and database rules reloaded successfully!")
+        # ── Outer card (clickable) ────────────────────────────────────────────
+        card = tk.Frame(self._feed_frame, bg=BG_CARD, pady=0, padx=0, cursor="hand2")
+        card.pack(fill="x", pady=2, padx=2)
+
+        # ── Summary row ───────────────────────────────────────────────────────
+        summary = tk.Frame(card, bg=BG_CARD, pady=8)
+        summary.pack(fill="x")
+
+        # Left colour bar
+        tk.Frame(summary, bg=color, width=4).pack(side="left", fill="y")
+
+        content = tk.Frame(summary, bg=BG_CARD, padx=10)
+        content.pack(side="left", fill="both", expand=True)
+
+        # Top line: toggle arrow + channel + action badge + time
+        top = tk.Frame(content, bg=BG_CARD)
+        top.pack(fill="x")
+
+        arrow_var = tk.StringVar(value="▶")
+        tk.Label(top, textvariable=arrow_var, bg=BG_CARD, fg=TEXT_MUT,
+                 font=("Segoe UI", 7)).pack(side="left", padx=(0, 4))
+
+        tk.Label(top, text=entry.get("channel", ""),
+                 bg=BG_CARD, fg=TEXT, font=("Segoe UI", 9, "bold")).pack(side="left")
+
+        badge_bg = DANGER if action == "BLOCK" else WARN if action == "WARN" else OK if action == "ALLOW" else BG_ROW
+        badge_fg = "#0f172a" if action in ("WARN", "ALLOW") else "white"
+        tk.Label(top, text=f"  {action}  ",
+                 bg=badge_bg, fg=badge_fg,
+                 font=("Segoe UI", 7, "bold")).pack(side="left", padx=6)
+
+        tk.Label(top, text=entry.get("time", ""),
+                 bg=BG_CARD, fg=TEXT_MUT, font=("Segoe UI", 8)).pack(side="right")
+
+        if entry.get("pattern"):
+            tk.Label(top, text=entry["pattern"],
+                     bg=BG_ROW, fg=TEXT_SEC,
+                     font=("Segoe UI", 7, "bold"), padx=6).pack(side="right", padx=(0, 4))
+
+        detail_text = entry.get("detail", "")
+        if detail_text:
+            tk.Label(content, text=detail_text,
+                     bg=BG_CARD, fg=TEXT_SEC, font=("Segoe UI", 9),
+                     anchor="w", wraplength=420, justify="left").pack(fill="x", pady=(2, 0))
+
+        # "Click for AI explanation" hint — only for non-clean events
+        has_ai = entry.get("match") is not None or entry.get("pattern")
+        if rl not in ("CLEAN", "LOW") and has_ai:
+            tk.Label(content, text="Click for AI explanation  ›",
+                     bg=BG_CARD, fg=ACCENT, font=("Segoe UI", 7),
+                     cursor="hand2").pack(anchor="w", pady=(2, 0))
+
+        # ── Expandable AI panel (hidden by default) ───────────────────────────
+        ai_panel = tk.Frame(card, bg="#0a0e1a", padx=14, pady=0)
+        # Not packed yet — shown on click
+
+        ai_text_var = tk.StringVar(value="")
+        ai_label = tk.Label(
+            ai_panel,
+            textvariable=ai_text_var,
+            bg="#0a0e1a", fg="#c7d2fe",
+            font=("Segoe UI", 8),
+            wraplength=430, justify="left", anchor="w",
+        )
+        ai_label.pack(fill="x", pady=(8, 10))
+
+        panel_open = [False]
+
+        def _fetch_and_show():
+            """Called in a background thread — fetches AI text and updates label."""
+            text = entry.get("ai_text")
+            if text is None:
+                # Try to call Gemini
+                match_obj  = entry.get("match")
+                fp         = entry.get("file_path") or entry.get("detail", "")
+                api_key    = self.state.get("gemini_api_key", "")
+                if match_obj is not None:
+                    try:
+                        from ai_explain import explain_finding
+                        text = explain_finding(match_obj, fp, api_key)
+                    except Exception as ex:
+                        text = f"AI explanation unavailable: {ex}"
+                elif entry.get("pattern"):
+                    # No Match object — build a short static explanation from pattern name
+                    p   = entry["pattern"]
+                    ch  = entry.get("channel", "")
+                    rl_ = entry.get("risk_level", "HIGH")
+                    api_key = self.state.get("gemini_api_key", "")
+                    if api_key:
+                        try:
+                            import google.generativeai as genai
+                            genai.configure(api_key=api_key)
+                            model = genai.GenerativeModel(
+                                "gemini-1.5-flash",
+                                generation_config={"max_output_tokens": 200, "temperature": 0.2}
+                            )
+                            prompt = (
+                                f"A DLP agent detected a '{p}' pattern in a {ch} channel event "
+                                f"(risk: {rl_}). Explain in two short paragraphs: "
+                                f"(1) why this is a data privacy risk, "
+                                f"(2) what the employee should do right now."
+                            )
+                            resp = model.generate_content(prompt, request_options={"timeout": 8})
+                            text = resp.text.strip() if resp.text else None
+                        except Exception:
+                            text = None
+                    if not text:
+                        text = (
+                            f"Pattern '{p}' was detected in a {ch} event.\n"
+                            f"This may indicate sensitive data was about to leave the organisation. "
+                            f"Do not share this content externally without approval from your IT security team."
+                        )
+                else:
+                    text = "No detailed explanation available for this event."
+                entry["ai_text"] = text
+            self.after(0, lambda t=text: ai_text_var.set(t))
+
+        def _toggle(event=None):
+            if panel_open[0]:
+                ai_panel.pack_forget()
+                arrow_var.set("▶")
+                panel_open[0] = False
+            else:
+                ai_panel.pack(fill="x")
+                arrow_var.set("▼")
+                panel_open[0] = True
+                if entry.get("ai_text") is None:
+                    ai_text_var.set("⏳  Asking Gemini…")
+                    threading.Thread(target=_fetch_and_show, daemon=True).start()
+                self.after(100, lambda: self._canvas.yview_moveto(
+                    self._canvas.yview()[0]))
+
+        # Bind click on the whole summary row (but only for non-clean events)
+        if rl not in ("CLEAN",):
+            for widget in [card, summary, content, top]:
+                widget.bind("<Button-1>", _toggle)
+
+        # ── Feature 5: Override request button (BLOCK only) ───────────────────
+        if action == "BLOCK":
+            override_bar = tk.Frame(card, bg="#0d1117", pady=5, padx=14)
+            override_bar.pack(fill="x")
+
+            tk.Label(
+                override_bar,
+                text="This transfer was blocked by policy.  ",
+                bg="#0d1117", fg="#475569", font=("Segoe UI", 7),
+            ).pack(side="left")
+
+            req_btn = tk.Label(
+                override_bar,
+                text="Request Override →",
+                bg="#0d1117", fg=ACCENT,
+                font=("Segoe UI", 7, "bold"),
+                cursor="hand2",
+            )
+            req_btn.pack(side="left")
+
+            def _open_override_dialog(e=None, _entry=entry):
+                """Open a small justification dialog and POST to server."""
+                dialog = tk.Toplevel(self)
+                dialog.title("Request Override")
+                dialog.configure(bg=BG)
+                dialog.resizable(False, False)
+                dw, dh = 420, 230
+                sw, sh = self.winfo_screenwidth(), self.winfo_screenheight()
+                dialog.geometry(f"{dw}x{dh}+{(sw - dw) // 2}+{(sh - dh) // 2}")
+                dialog.grab_set()
+
+                tk.Label(dialog, text="Why do you need to send this?",
+                         bg=BG, fg=TEXT, font=("Segoe UI", 10, "bold")).pack(anchor="w", padx=16, pady=(16, 4))
+                tk.Label(dialog,
+                         text=f"Channel: {_entry.get('channel', '')}  ·  Pattern: {_entry.get('pattern', '')}",
+                         bg=BG, fg=TEXT_MUT, font=("Segoe UI", 8)).pack(anchor="w", padx=16)
+
+                txt = tk.Text(dialog, height=4, bg=BG_ROW, fg=TEXT, insertbackground=TEXT,
+                              font=("Segoe UI", 9), relief="flat", padx=8, pady=6,
+                              wrap="word", highlightthickness=1, highlightbackground=BORDER)
+                txt.pack(fill="x", padx=16, pady=(8, 0))
+
+                status_var = tk.StringVar(value="")
+                status_lbl = tk.Label(dialog, textvariable=status_var, bg=BG,
+                                      fg=ACCENT, font=("Segoe UI", 8))
+                status_lbl.pack(anchor="w", padx=16, pady=(4, 0))
+
+                def _submit():
+                    justification = txt.get("1.0", "end").strip()
+                    if not justification:
+                        status_var.set("Please enter a reason.")
+                        return
+                    status_var.set("Submitting…")
+                    dialog.update()
+
+                    def _post():
+                        try:
+                            import httpx, json as _json
+                            payload = {
+                                "employee_id":   self.state.get("employee_id", ""),
+                                "agent_id":      self.state.get("agent_id", ""),
+                                "event_channel": _entry.get("channel", ""),
+                                "event_detail":  _entry.get("detail", ""),
+                                "pattern":       _entry.get("pattern", ""),
+                                "justification": justification,
+                            }
+                            if self.server_url:
+                                httpx.post(
+                                    f"{self.server_url}/api/overrides",
+                                    json=payload, timeout=6,
+                                )
+                            self.after(0, lambda: status_var.set("✓ Request submitted. Your manager will be notified."))
+                            self.after(2500, dialog.destroy)
+                        except Exception as ex:
+                            self.after(0, lambda msg=str(ex): status_var.set(f"Failed: {msg}"))
+
+                    threading.Thread(target=_post, daemon=True).start()
+
+                btn_row = tk.Frame(dialog, bg=BG)
+                btn_row.pack(fill="x", padx=16, pady=(8, 16))
+                tk.Label(btn_row, text="", bg=BG).pack(side="left", expand=True)
+                cancel_btn = tk.Label(btn_row, text="Cancel", bg=BG_ROW, fg=TEXT_SEC,
+                                      font=("Segoe UI", 8, "bold"), padx=10, pady=4, cursor="hand2")
+                cancel_btn.pack(side="left", padx=(0, 6))
+                cancel_btn.bind("<Button-1>", lambda e: dialog.destroy())
+
+                submit_btn = tk.Label(btn_row, text="Submit Request", bg=ACCENT, fg="white",
+                                      font=("Segoe UI", 8, "bold"), padx=12, pady=4, cursor="hand2")
+                submit_btn.pack(side="left")
+                submit_btn.bind("<Button-1>", lambda e: _submit())
+
+            req_btn.bind("<Button-1>", _open_override_dialog)
+
+
+    # ─────────────────────────────────────────────────────────────────────────
+    #  Scan folder
+    # ─────────────────────────────────────────────────────────────────────────
+    def trigger_scan_folder(self, folder: str = ""):
+        """Called by scan button or system tray."""
+        if self._scan_running.is_set():
+            self._scan_status.configure(text="Scan already in progress…", fg=WARN)
+            return
+
+        if not folder:
+            folder = filedialog.askdirectory(
+                title="Select Folder to Scan Before Sending",
+                parent=self,
+            )
+        if not folder:
+            return
+
+        self._scan_running.set()
+        self._scan_lbl.configure(text="⏳   Scanning…", bg="#334155")
+        self._scan_status.configure(text=f"Scanning: {folder}", fg=TEXT_MUT)
+        self.update()
+
+        threading.Thread(target=self._run_scan, args=(folder,), daemon=True).start()
+
+    def _run_scan(self, folder: str):
+        """Runs in a background thread. Pushes results to the feed via after()."""
+        found   = []
+        all_fps = []
+
+        try:
+            import scanner
+            import scanner_analysis as behaviour
+            import classifier
+
+            policy_manager = self.state["policy_manager"]
+            config = {"root_path": folder, "policy_manager": policy_manager}
+
+            # Collect files
+            for root, _, fnames in os.walk(folder):
+                for fname in fnames:
+                    fp = os.path.join(root, fname)
+                    if not fname.endswith(".quarantine_info"):
+                        all_fps.append(fp)
+
+            total = len(all_fps)
+            self.after(0, lambda t=total: self._scan_status.configure(
+                text=f"Scanning {t} file(s)…", fg=TEXT_MUT
+            ))
+
+            for fp in all_fps:
+                try:
+                    matches    = scanner.scan_file(fp, config)
+                    matches    = behaviour.proximity_multiplier(matches)
+                    result     = classifier.classify_file(matches, file_path=fp)
+                    rl         = result.get("risk_level", "CLEAN")
+
+                    if rl != "CLEAN":
+                        # Extract pattern from Match object (has .pattern_name, not .get())
+                        top_matches = result.get("top_matches", [])
+                        if top_matches:
+                            m = top_matches[0]
+                            # Match is a namedtuple/dataclass — use attribute access
+                            pattern = getattr(m, "pattern_name",
+                                     getattr(m, "rule_name",
+                                     m.get("pattern_name", "") if isinstance(m, dict) else ""))
+                        else:
+                            pattern = ""
+
+                        rel    = os.path.relpath(fp, folder)
+                        action = "BLOCK" if rl == "HIGH" else "WARN"
+
+                        found.append({
+                            "channel":    "FILE SCAN",
+                            "action":     action,
+                            "detail":     rel,
+                            "risk_level": rl,
+                            "pattern":    pattern,
+                            "result":     result,
+                        })
+
+                        # Capture top Match object for AI explainer
+                        top_match = top_matches[0] if top_matches else None
+
+                        # Push to UI immediately — pass match + full path for AI
+                        self.after(0, lambda c="FILE SCAN", a=action, d=rel, r=rl,
+                                   p=pattern, mo=top_match, fpp=fp:
+                                   self.push_threat(c, a, d, r, p,
+                                                    match=mo, file_path=fpp))
+
+                except Exception:
+                    pass   # skip unreadable files silently
+
+            # Feature 3: Pattern hit count summary row
+            if not found:
+                self.after(0, lambda t=total: self.push_threat(
+                    "FILE SCAN", "ALLOW",
+                    f"All {t} file(s) clean — safe to send",
+                    "CLEAN", ""
+                ))
+                self.after(0, lambda: self._scan_status.configure(
+                    text=f"Scan complete — {total} file(s), no issues found", fg=OK
+                ))
+            else:
+                n = len(found)
+                # Build pattern breakdown string e.g. "2× CREDIT_CARD, 1× SSN"
+                pattern_counts = Counter(
+                    item["pattern"] for item in found if item.get("pattern")
+                )
+                breakdown = ", ".join(
+                    f"{cnt}× {pat}" for pat, cnt in pattern_counts.most_common()
+                )
+                summary_detail = f"{n} file(s) flagged out of {total} scanned"
+                if breakdown:
+                    summary_detail += f"  —  {breakdown}"
+
+                self.after(0, lambda sd=summary_detail: self.push_threat(
+                    "FILE SCAN", "WARN",
+                    sd,
+                    "MEDIUM", ""
+                ))
+                self.after(0, lambda n=n, t=total: self._scan_status.configure(
+                    text=f"Scan complete — {n} issue(s) found in {t} file(s)", fg=WARN
+                ))
+
+            # Report found issues to server
+            client = self.state.get("reporting_client")
+            if client and found:
+                for item in found:
+                    try:
+                        client.enqueue_event(item["result"], "FILE", item["action"])
+                    except Exception:
+                        pass
+
+        except Exception as e:
+            self.after(0, lambda err=str(e): self.push_threat(
+                "FILE SCAN", "ERROR", f"Scan failed: {err}", "MEDIUM", ""
+            ))
+            self.after(0, lambda err=str(e): self._scan_status.configure(
+                text=f"Scan error: {err}", fg=DANGER
+            ))
+        finally:
+            self._scan_running.clear()
+            self.after(0, lambda: self._scan_lbl.configure(
+                text="📂   Browse & Scan Folder", bg=ACCENT
+            ))
+
+    # ─────────────────────────────────────────────────────────────────────────
+    #  Logout
+    # ─────────────────────────────────────────────────────────────────────────
+    def _do_logout(self):
+        if messagebox.askyesno(
+            "Logout",
+            "Logging out will stop all monitoring on this machine.\n\nAre you sure?",
+            parent=self,
+        ):
+            # Clear local history so next employee starts fresh
+            try:
+                clear_history()
+            except Exception:
+                pass
+            self.destroy()
+            if self.logout_callback:
+                self.logout_callback()
+            else:
+                sys.exit(0)
+
+    # ─────────────────────────────────────────────────────────────────────────
+    #  Close: hide to tray
+    # ─────────────────────────────────────────────────────────────────────────
+    def on_close(self):
+        self.withdraw()

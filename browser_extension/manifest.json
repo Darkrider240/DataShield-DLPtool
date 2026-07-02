@@ -1,0 +1,47 @@
+{
+  "manifest_version": 3,
+  "name": "DataShield DLP",
+  "version": "1.0.0",
+  "description": "DataShield Enterprise – real-time DLP protection for outgoing webmail. Scans emails before they are sent and blocks policy violations.",
+  "icons": {
+    "16":  "icons/shield16.png",
+    "48":  "icons/shield48.png",
+    "128": "icons/shield128.png"
+  },
+  "permissions": [
+    "storage",
+    "notifications",
+    "activeTab",
+    "scripting"
+  ],
+  "host_permissions": [
+    "https://mail.google.com/*",
+    "https://outlook.live.com/*",
+    "https://outlook.office.com/*",
+    "https://outlook.office365.com/*",
+    "http://127.0.0.1:5000/*"
+  ],
+  "content_scripts": [
+    {
+      "matches": [
+        "https://mail.google.com/*",
+        "https://outlook.live.com/*",
+        "https://outlook.office.com/*",
+        "https://outlook.office365.com/*"
+      ],
+      "js": ["content.js"],
+      "run_at": "document_idle"
+    }
+  ],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "action": {
+    "default_popup": "popup.html",
+    "default_icon": {
+      "16":  "icons/shield16.png",
+      "48":  "icons/shield48.png",
+      "128": "icons/shield128.png"
+    }
+  }
+}

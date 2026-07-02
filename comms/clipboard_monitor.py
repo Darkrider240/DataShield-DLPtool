@@ -48,8 +48,9 @@ class ClipboardMonitor:
                 if not content:
                     continue
                 
-                # De-duplicate identical copies and skip short words
-                if content == self.last_copied or len(content) < 20:
+                # De-duplicate identical copies and skip very short words
+                # (Minimum length reduced to 4 to catch short codes like ICD-10 codes, e.g. E11.9)
+                if content == self.last_copied or len(content) < 4:
                     continue
                     
                 self.last_copied = content
@@ -69,13 +70,32 @@ class ClipboardMonitor:
                     matches = scanner.scan_file(temp_file_path, config)
                     classification = classifier.classify_file(matches, file_path=temp_file_path)
                     
-                    if classification["risk_level"] in ["HIGH", "MEDIUM"]:
+                    # Clipboard-specific override: copy-pasting even a single highly sensitive entity
+                    # (Aadhaar, SSN, PAN, Passport, Voter ID, Credit Card, UPI, IFSC, IBAN, API Key, Password, ICD-10)
+                    # should trigger the block/clearing.
+                    has_sensitive_match = False
+                    for m in matches:
+                        # Exclude low-weight/noisy items like single emails/phones (weight < 1.5),
+                        # but block all high-value patterns (weight >= 1.5)
+                        if m.category in ["PII", "FINANCIAL", "SECRETS", "HEALTH"] and m.base_weight >= 1.5:
+                            has_sensitive_match = True
+                            break
+
+                    if classification["risk_level"] in ["HIGH", "MEDIUM"] or has_sensitive_match:
+                        # Upgrade classification to MEDIUM risk level to trigger the policy block/warn
+                        if classification["risk_level"] not in ["HIGH", "MEDIUM"]:
+                            classification["risk_level"] = "MEDIUM"
+                            classification["risk_score"] = max(4.0, classification["risk_score"])
+                            if matches and not classification.get("top_matches"):
+                                classification["top_matches"] = matches[:1]
+
                         decision = comms_engine.decide(
                             classification, channel="CLIPBOARD",
                             audit_logger=self.state["audit_logger"], explain=False
                         )
                         
                         if decision.action in ["BLOCK", "WARN"]:
+                            print(f"[ClipboardMonitor] 🚫 Action: {decision.action} on pattern {decision.top_pattern}", flush=True)
                             # Clear clipboard immediately
                             pyperclip.copy('')
                             self.last_copied = ""  # Reset to allow new scans

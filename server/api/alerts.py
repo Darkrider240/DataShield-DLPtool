@@ -40,6 +40,7 @@ async def acknowledge(alert_id: str, body: AlertAcknowledgeRequest, db: AsyncSes
     alert.status = "ACKNOWLEDGED"
     alert.acknowledged_by = current_user.email
     alert.acknowledged_at = datetime.now(timezone.utc)
+    await db.commit()
     return {"status": "acknowledged"}
 
 
@@ -51,4 +52,5 @@ async def resolve(alert_id: str, db: AsyncSession = Depends(get_db)):
         raise HTTPException(status_code=404, detail="Alert not found")
     alert.status = "RESOLVED"
     alert.resolved_at = datetime.now(timezone.utc)
+    await db.commit()
     return {"status": "resolved"}

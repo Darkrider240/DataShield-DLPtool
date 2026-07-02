@@ -13,12 +13,17 @@ class Employee(Base):
     department: Mapped[str] = mapped_column(String, nullable=False, default="")
     job_title: Mapped[str] = mapped_column(String, nullable=False, default="")
 
+    # Account status (admin can deactivate without deleting)
+    is_active: Mapped[bool] = mapped_column(Boolean, default=True)
+
     # Risk scoring
     risk_score: Mapped[float] = mapped_column(Float, default=0.0)
-    risk_level: Mapped[str] = mapped_column(String, default="CLEAN")  # CLEAN | LOW | MEDIUM | HIGH
+    risk_level: Mapped[str] = mapped_column(String, default="CLEAN")   # CLEAN | LOW | MEDIUM | HIGH
     high_violations_7d: Mapped[int] = mapped_column(Integer, default=0)
     medium_violations_7d: Mapped[int] = mapped_column(Integer, default=0)
     total_events_30d: Mapped[int] = mapped_column(Integer, default=0)
+    # Weekly event baseline — used by the anomaly detector for volume spike detection
+    average_volume_30d: Mapped[float] = mapped_column(Float, default=0.0)
 
     # Flagging
     is_flagged: Mapped[bool] = mapped_column(Boolean, default=False)
@@ -35,9 +40,11 @@ class Employee(Base):
     monitor_webmail: Mapped[bool] = mapped_column(Boolean, default=True)
     monitor_file_scan: Mapped[bool] = mapped_column(Boolean, default=True)
 
-    # PIN authentication (hashed, set by admin, changed by employee on first login)
+    # PIN authentication (hashed, set by admin)
     pin_hash: Mapped[str | None] = mapped_column(String, nullable=True, default=None)
     pin_set: Mapped[bool] = mapped_column(Boolean, default=False)
 
     created_at: Mapped[DateTime] = mapped_column(DateTime(timezone=True), server_default=func.now())
-    updated_at: Mapped[DateTime] = mapped_column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
+    updated_at: Mapped[DateTime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
+    )

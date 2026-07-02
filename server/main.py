@@ -11,7 +11,9 @@ from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from server.database import create_all_tables, AsyncSessionFactory
 from server.config import get_settings
 from server.api import auth, agents, employees, events, policies, alerts, reports, encryption
+from server.api.overrides import router as overrides_router
 from server.api.websocket import router as ws_router
+from server.models import override as _override_model  # noqa: F401 — registers model for create_all
 from server.services.behaviour import detect_anomalies
 
 settings = get_settings()
@@ -20,6 +22,9 @@ scheduler = AsyncIOScheduler()
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    # Guard against shipping with default CHANGEME secrets
+    _validate_secrets()
+
     # Create tables (dev convenience; use Alembic for production)
     await create_all_tables()
 
@@ -33,6 +38,22 @@ async def lifespan(app: FastAPI):
     yield
 
     scheduler.shutdown(wait=False)
+
+
+def _validate_secrets():
+    """Refuse to start with unchanged default secrets."""
+    dangerous = [
+        ("JWT_SECRET_KEY",        settings.JWT_SECRET_KEY,        "CHANGEME"),
+        ("MASTER_KEY_PASSPHRASE", settings.MASTER_KEY_PASSPHRASE, "CHANGEME"),
+        ("AGENT_API_KEY",         settings.AGENT_API_KEY,         "CHANGEME"),
+    ]
+    bad = [name for name, val, marker in dangerous if marker in val]
+    if bad:
+        raise RuntimeError(
+            f"[DataShield] FATAL: The following secrets still have CHANGEME defaults:\n"
+            f"  {', '.join(bad)}\n"
+            f"Set them in your .env file before starting the server."
+        )
 
 
 async def _run_anomaly_check():
@@ -80,10 +101,16 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
-# CORS — allow the dashboard (Vite dev :5173 and prod :80) and extension origins
+# CORS — allow the dashboard (Vite dev :5173 and prod :80) and browser extension origins
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:5173", "http://localhost:80", "http://localhost:3000"],
+    allow_origins=[
+        "http://localhost:5173",
+        "http://localhost:3000",
+        "http://localhost:80",
+        "http://localhost:8001",
+    ],
+    allow_origin_regex=r"chrome-extension://.*",   # browser extension requests
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -99,6 +126,7 @@ app.include_router(policies.router)
 app.include_router(alerts.router)
 app.include_router(reports.router)
 app.include_router(encryption.router)
+app.include_router(overrides_router)
 
 
 @app.get("/api/health")

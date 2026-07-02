@@ -59,6 +59,7 @@ async def flag_employee(employee_id: str, body: FlagRequest, db: AsyncSession = 
     emp.flag_reason = body.reason
     emp.flagged_at = datetime.now(timezone.utc)
     emp.flagged_by = current_user.email
+    await db.commit()
     return {"status": "flagged"}
 
 
@@ -71,6 +72,7 @@ async def unflag_employee(employee_id: str, db: AsyncSession = Depends(get_db)):
     emp.is_flagged = False
     emp.flag_reason = ""
     emp.flagged_at = None
+    await db.commit()
     return {"status": "unflagged"}
 
 
@@ -134,3 +136,116 @@ async def update_monitoring_settings(
     await db.commit()
     await db.refresh(emp)
     return MonitoringSettings.model_validate(emp)
+
+
+# ── Feature 11: CSV Bulk Import ───────────────────────────────────────────────
+import csv, io, uuid as _uuid
+from fastapi import UploadFile, File
+
+@router.post("/import", dependencies=[Depends(require_superadmin)])
+async def import_employees_csv(
+    file: UploadFile = File(...),
+    db:   AsyncSession = Depends(get_db),
+):
+    """Bulk-create employees from a CSV with columns: name, email, department."""
+    content = await file.read()
+    text    = content.decode("utf-8", errors="replace")
+    reader  = csv.DictReader(io.StringIO(text))
+
+    created, skipped, errors = 0, 0, []
+
+    for row in reader:
+        email = (row.get("email") or "").strip().lower()
+        name  = (row.get("name") or row.get("full_name") or "").strip()
+        dept  = (row.get("department") or row.get("dept") or "").strip()
+
+        if not email or "@" not in email:
+            errors.append(f"Skipped — invalid email: '{email or 'empty'}'")
+            skipped += 1
+            continue
+
+        existing = await db.execute(select(Employee).where(Employee.email == email))
+        if existing.scalar_one_or_none():
+            skipped += 1
+            continue
+
+        emp = Employee(
+            id=str(_uuid.uuid4()),
+            email=email,
+            full_name=name or email.split("@")[0].title(),
+            department=dept,
+            risk_score=0.0,
+            is_active=True,
+            encrypted_dek=create_employee_dek(),
+        )
+        db.add(emp)
+        created += 1
+
+    await db.commit()
+    return {"status": "ok", "created": created, "skipped": skipped, "errors": errors}
+
+
+# ── Feature 6: Employee Report Card ──────────────────────────────────────────
+from collections import Counter as _Counter
+from datetime import timedelta
+
+@router.get("/{employee_id}/report")
+async def get_employee_report(
+    employee_id: str,
+    db: AsyncSession = Depends(get_db),
+    _: AdminUser = Depends(get_current_user),
+):
+    """Full 30-day stats report card for one employee."""
+    from server.models.event import DLPEvent
+
+    emp_r = await db.execute(select(Employee).where(Employee.id == employee_id))
+    emp   = emp_r.scalar_one_or_none()
+    if not emp:
+        raise HTTPException(status_code=404, detail="Employee not found")
+
+    cutoff   = datetime.now(timezone.utc) - timedelta(days=30)
+    events_r = await db.execute(
+        select(DLPEvent)
+        .where(DLPEvent.employee_id == employee_id)
+        .where(DLPEvent.occurred_at >= cutoff)
+        .order_by(DLPEvent.occurred_at.asc())
+    )
+    events = events_r.scalars().all()
+
+    pattern_ctr: _Counter = _Counter()
+    channel_ctr: _Counter = _Counter()
+    high = med = low = 0
+    daily: dict[str, float] = {}
+
+    for ev in events:
+        channel_ctr[ev.channel] += 1
+        if   ev.risk_level == "HIGH":   high += 1
+        elif ev.risk_level == "MEDIUM": med  += 1
+        elif ev.risk_level == "LOW":    low  += 1
+        for p in (ev.pattern_names or []):
+            pattern_ctr[p] += 1
+        day = ev.occurred_at.strftime("%Y-%m-%d")
+        daily[day] = max(daily.get(day, 0.0), float(ev.risk_score or 0))
+
+    # Org-average risk score
+    avg_r = await db.execute(
+        select(func.avg(Employee.risk_score)).where(Employee.is_active == True)
+    )
+    org_avg = float(avg_r.scalar() or 0.0)
+
+    return {
+        "employee_id":       emp.id,
+        "employee_name":     emp.full_name or emp.email,
+        "employee_email":    emp.email,
+        "risk_score":        emp.risk_score or 0.0,
+        "is_flagged":        emp.is_flagged or False,
+        "flag_reason":       emp.flag_reason or "",
+        "total_events_30d":  len(events),
+        "high_events_30d":   high,
+        "medium_events_30d": med,
+        "low_events_30d":    low,
+        "top_patterns":      [p for p, _ in pattern_ctr.most_common(5)],
+        "channel_breakdown": dict(channel_ctr),
+        "daily_risk_scores": [{"date": k, "score": v} for k, v in sorted(daily.items())],
+        "org_avg_risk_score": org_avg,
+    }

@@ -22,7 +22,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import scanner
-import behaviour
+import scanner_analysis as behaviour
 import classifier
 import ai_explain
 import quarantine
@@ -178,13 +178,40 @@ def run_system_tray(name: str, email: str):
                 pass
 
     def _scan_now(icon, item):
+        """
+        Tray menu: '📁 Scan Folder Before Sending'
+        Opens a folder picker in the main thread, then triggers
+        trigger_scan_folder() on the MainWindow — the unique employee
+        capability to scan a local folder before sending documents.
+        """
         win = _tray_state.get("main_window")
-        if win and hasattr(win, "trigger_scan"):
-            try:
-                win.deiconify()
-                win.trigger_scan()
-            except Exception:
-                pass
+        if win and win.winfo_exists():
+            def _pick_and_scan():
+                from tkinter import filedialog
+                folder = filedialog.askdirectory(
+                    title="Select Folder to Scan Before Sending",
+                    parent=win,
+                )
+                if folder and hasattr(win, "trigger_scan_folder"):
+                    win.trigger_scan_folder(folder)
+            win.after(0, _pick_and_scan)
+        else:
+            # Window not open yet — open it first, then scan
+            def _open_then_scan():
+                import tkinter as tk
+                from tkinter import filedialog
+                dummy = tk.Tk()
+                dummy.withdraw()
+                folder = filedialog.askdirectory(
+                    title="Select Folder to Scan Before Sending",
+                )
+                dummy.destroy()
+                if folder:
+                    w = _tray_state.get("main_window")
+                    if w and hasattr(w, "trigger_scan_folder"):
+                        w.after(0, lambda: w.trigger_scan_folder(folder))
+            import threading
+            threading.Thread(target=_open_then_scan, daemon=True).start()
 
     def _exit_agent(icon, item):
         print("[*] DataShield agent stopping...")
@@ -207,10 +234,10 @@ def run_system_tray(name: str, email: str):
         pystray.MenuItem(f"DataShield  —  {name}", None, enabled=False),
         pystray.MenuItem(f"{email}", None, enabled=False),
         pystray.Menu.SEPARATOR,
-        pystray.MenuItem("Open DataShield",    _open_window, default=True),
-        pystray.MenuItem("Scan Files Now",     _scan_now),
+        pystray.MenuItem("Open DataShield",              _open_window, default=True),
+        pystray.MenuItem("Scan Folder Before Sending",   _scan_now),
         pystray.Menu.SEPARATOR,
-        pystray.MenuItem("Exit DataShield",    _exit_agent),
+        pystray.MenuItem("Exit DataShield",              _exit_agent),
     )
 
     icon = pystray.Icon("DataShield", img, f"DataShield  ({name})", menu)
@@ -303,9 +330,9 @@ def show_login_dialog(server_url: str, agent_api_key: str):
     canvas.pack()
     canvas.create_text(W // 2, 42, text="DataShield", fill="#6366f1",
                        font=("Arial", 26, "bold"))
-    canvas.create_text(W // 2, 68, text="Employee Protection Agent",
+    canvas.create_text(W // 2, 68, text="Enterprise Data Loss Prevention",
                        fill="#475569", font=("Arial", 10))
-    canvas.create_text(W // 2, 88, text="Protecting your workstation and company data",
+    canvas.create_text(W // 2, 88, text="Sign in with your work email",
                        fill="#334155", font=("Arial", 8))
 
     tk.Frame(root, height=1, bg="#1e293b").pack(fill="x")
@@ -313,7 +340,7 @@ def show_login_dialog(server_url: str, agent_api_key: str):
     card = tk.Frame(root, bg="#0f172a", padx=40, pady=30)
     card.pack(fill="both", expand=True)
 
-    tk.Label(card, text="Sign in to activate protection",
+    tk.Label(card, text="Sign in to continue",
              bg="#0f172a", fg="#94a3b8", font=("Arial", 11)).pack(pady=(0, 20))
 
     # Work Email
@@ -358,8 +385,8 @@ def show_login_dialog(server_url: str, agent_api_key: str):
             )
             if admin_resp.status_code == 200:
                 data = admin_resp.json()
-                result["role"]   = "admin"
-                result["name"]   = data.get("name", email)
+                result["role"]   = "admin"  # normalise — always opens AdminConsole
+                result["name"]   = data.get("full_name") or data.get("name") or email.split("@")[0].title()
                 result["email"]  = email
                 result["token"]  = data.get("access_token", "")
                 root.destroy()
@@ -381,10 +408,11 @@ def show_login_dialog(server_url: str, agent_api_key: str):
                         "Ask your admin to set one in the DataShield console."
                     )
                     return
-                result["role"]  = data["role"]
-                result["name"]  = data["name"]
-                result["email"] = data["email"]
-                result["token"] = ""
+                result["role"]        = data["role"]
+                result["name"]        = data["name"]
+                result["email"]       = data["email"]
+                result["employee_id"] = data.get("employee_id", "")
+                result["token"]       = ""
                 root.destroy()
                 return
             elif emp_resp.status_code == 401:
@@ -419,11 +447,11 @@ def show_login_dialog(server_url: str, agent_api_key: str):
     help_frame = tk.Frame(card, bg="#0f172a")
     help_frame.pack(pady=(16, 0), fill="x")
     tk.Label(help_frame,
-             text="Employees: enter your work email + PIN set by your admin",
+             text="Employees: email + PIN (set by your IT admin)",
              bg="#0f172a", fg="#475569", font=("Arial", 8)).pack()
     tk.Label(help_frame,
-             text="Admins: enter your email + admin password",
-             bg="#0f172a", fg="#334155", font=("Arial", 8)).pack(pady=(2, 0))
+             text="Admins: email + admin password  →  opens Admin Console",
+             bg="#0f172a", fg="#475569", font=("Arial", 8)).pack(pady=(2, 0))
 
     email_entry.focus_set()
     root.bind("<Return>", do_login)
@@ -475,12 +503,13 @@ def main():
         user_info = {"role": "employee", "name": "Local User", "email": "local@datashield"}
         print("[*] No SERVER_URL in .env — running in standalone mode (no reporting).")
 
-    role  = user_info["role"]
-    name  = user_info["name"]
-    email = user_info["email"]
-    token = user_info.get("token", "")
+    role        = user_info["role"]
+    name        = user_info["name"]
+    email       = user_info["email"]
+    token       = user_info.get("token", "")
+    employee_id = user_info.get("employee_id", "")
 
-    # ── ADMIN → open the desktop management console ───────────────────────────
+    # ── ADMIN -> open the desktop management console ────────────────────────────
     if role == "admin":
         print(f"[*] Admin '{name}' signed in — opening DataShield Management Console.")
         os.environ["EMPLOYEE_NAME"]  = name
@@ -555,22 +584,24 @@ def main():
                 _tray_state["risk_level"] = lvl
                 _update_tray_icon()
 
-    # ── Read per-employee monitoring settings from login response ────────────
+    # -- Read per-employee monitoring settings ---------------------------------
     monitoring = {
         "clipboard": user_info.get("monitor_clipboard", True),
         "usb":       user_info.get("monitor_usb",       True),
         "webmail":   user_info.get("monitor_webmail",   True),
         "file_scan": user_info.get("monitor_file_scan", True),
+        "cloud":     user_info.get("monitor_cloud",     True),
     }
     disabled = [k.upper() for k, v in monitoring.items() if not v]
     if disabled:
-        print(f"[*] Channels DISABLED by admin for this account: {', '.join(disabled)}")
+        print("[*] Channels DISABLED by admin: " + ", ".join(disabled))
     else:
         print("[*] All monitoring channels enabled for this account.")
 
     clipboard_monitor = None
     usb_monitor       = None
     webmail_server    = None
+    cloud_monitor     = None
 
     if monitoring["clipboard"]:
         try:
@@ -579,9 +610,9 @@ def main():
             clipboard_monitor.start()
             print("[*] Clipboard monitor active.")
         except Exception as e:
-            print(f"[*] Clipboard monitor unavailable: {e}")
+            print("[*] Clipboard monitor unavailable:", e)
     else:
-        print("[*] Clipboard monitor DISABLED for this employee by admin policy.")
+        print("[*] Clipboard monitor DISABLED by admin policy.")
 
     if monitoring["usb"]:
         try:
@@ -590,55 +621,207 @@ def main():
             usb_monitor.start()
             print("[*] USB watcher active.")
         except Exception as e:
-            print(f"[*] USB watcher unavailable: {e}")
+            print("[*] USB watcher unavailable:", e)
     else:
-        print("[*] USB watcher DISABLED for this employee by admin policy.")
+        print("[*] USB watcher DISABLED by admin policy.")
 
     if monitoring["webmail"]:
         try:
             from comms.http_server import DataShieldHTTPServer
+            # Inject identity so /me and /request_override endpoints work
+            bg_state["employee_id"]    = employee_id
+            bg_state["employee_email"] = email
+            bg_state["employee_name"]  = name
+            bg_state["server_url"]     = server_url
             webmail_server = DataShieldHTTPServer(bg_state, on_event_callback=_bg_event)
             webmail_server.start()
-            print("[*] Webmail scan API active on port 5000 (browser extension ready).")
+            print("[*] Webmail scan API active on port 5000.")
         except Exception as e:
-            print(f"[*] Webmail HTTP server unavailable: {e}")
+            print("[*] Webmail HTTP server unavailable:", e)
     else:
-        print("[*] Webmail monitor DISABLED for this employee by admin policy.")
+        print("[*] Webmail monitor DISABLED by admin policy.")
 
-    # Step 4: System tray (starts silently in background)
+    if monitoring["cloud"]:
+        try:
+            from comms.cloud_watcher import CloudWatcher
+            cloud_monitor = CloudWatcher(bg_state, on_finding_callback=_bg_event)
+            cloud_monitor.start()
+            if cloud_monitor.running:
+                providers = ", ".join(cloud_monitor.active_providers)
+                print(f"[*] Cloud DLP active — providers: {providers}")
+            else:
+                print("[*] Cloud DLP: no sync folders found on this machine.")
+        except Exception as e:
+            print("[*] Cloud monitor unavailable:", e)
+    else:
+        print("[*] Cloud monitor DISABLED by admin policy.")
+
+    # Step 4: System tray
     run_system_tray(name, email)
 
-    # Step 5: Create the main window (hidden by default)
+    # Step 5: Employee home window
     try:
-        from gui.main_window import MainWindow
-        app = MainWindow(role="employee", user_name=name, user_email=email)
+        from gui.main_window import EmployeeHomeWindow
+
+        def _do_logout():
+            print("[*] Employee logged out.")
+            for mon in [clipboard_monitor, usb_monitor, cloud_monitor]:
+                if mon:
+                    try: mon.stop()
+                    except Exception: pass
+            if webmail_server:
+                try: webmail_server.stop()
+                except Exception: pass
+            if client:
+                try: client.stop()
+                except Exception: pass
+            import subprocess
+            subprocess.Popen([sys.executable] + sys.argv)
+            sys.exit(0)
+
+        app = EmployeeHomeWindow(
+            user_name=name,
+            user_email=email,
+            monitors=monitoring,
+            server_url=server_url,
+            logout_callback=_do_logout,
+        )
         if client:
             app.state["reporting_client"] = client
         bg_state["root_window"] = app
-
-        # Give tray access to the window so menu items work
         _tray_state["main_window"] = app
 
-        # Override close button: hide to tray instead of quitting
         def _on_close():
-            app.withdraw()          # hide window, keep agent running
+            app.withdraw()
             alerts.send_desktop_notification(
                 "DataShield",
-                "Still protecting your workstation in the background.\n"
-                "Right-click the tray icon to re-open or exit."
-            )
+                "Still protecting your workstation in the background.")
         app.protocol("WM_DELETE_WINDOW", _on_close)
 
-        print("[*] DataShield running. Window minimized to system tray.")
+        _orig_bg = _bg_event
+        def _bg_event_with_feed(channel, action, detail, decision=None, **kwargs):
+            _orig_bg(channel, action, detail, decision=decision, **kwargs)
+            # Allow all USB events to show in threat feed even if CLEAN/LOG
+            is_usb_sys = (channel == "USB")
+            if action in ("ALLOW", "LOG") and not is_usb_sys:
+                return
+            rl = "HIGH"
+            if decision and hasattr(decision, "risk_level"):
+                rl = decision.risk_level
+            elif action == "WARN":
+                rl = "MEDIUM"
+            elif action == "LOG":
+                rl = "CLEAN"
+            pattern = getattr(decision, "top_pattern", "") if decision else ""
+            app.after(0, lambda c=channel, a=action, d=detail, r=rl, p=pattern:
+                       app.push_threat(c, a, d, r, p))
+
+        if clipboard_monitor and hasattr(clipboard_monitor, "on_finding_callback"):
+            clipboard_monitor.on_finding_callback = _bg_event_with_feed
+        if usb_monitor and hasattr(usb_monitor, "on_event_callback"):
+            usb_monitor.on_event_callback = _bg_event_with_feed
+        if webmail_server and hasattr(webmail_server, "on_event_callback"):
+            webmail_server.on_event_callback = _bg_event_with_feed
+        if cloud_monitor and hasattr(cloud_monitor, "on_finding_callback"):
+            cloud_monitor.on_finding_callback = _bg_event_with_feed
+
+        def _handle_monitoring_update(new_monitors):
+            nonlocal monitoring, clipboard_monitor, usb_monitor, webmail_server
+            print(f"[*] Dynamic config sync: Received monitoring state: {new_monitors}")
+            
+            # Update local config state
+            monitoring.update(new_monitors)
+            if app and app.winfo_exists():
+                app.update_monitor_pills(monitoring)
+
+            # 1. Clipboard Monitor
+            if monitoring.get("clipboard", True):
+                if not clipboard_monitor:
+                    try:
+                        from comms.clipboard_monitor import ClipboardMonitor
+                        clipboard_monitor = ClipboardMonitor(bg_state, on_finding_callback=_bg_event_with_feed)
+                        clipboard_monitor.start()
+                        print("[*] Clipboard monitor activated dynamically.")
+                    except Exception as e:
+                        print("[*] Failed to start clipboard monitor dynamically:", e)
+                elif not clipboard_monitor.running:
+                    clipboard_monitor.start()
+                    print("[*] Clipboard monitor started dynamically.")
+            else:
+                if clipboard_monitor and clipboard_monitor.running:
+                    clipboard_monitor.stop()
+                    print("[*] Clipboard monitor stopped dynamically.")
+
+            # 2. USB Monitor
+            if monitoring.get("usb", True):
+                if not usb_monitor:
+                    try:
+                        from comms.usb_watcher import USBWatcher
+                        usb_monitor = USBWatcher(bg_state, on_report_callback=None, on_event_callback=_bg_event_with_feed)
+                        usb_monitor.start()
+                        print("[*] USB watcher activated dynamically.")
+                    except Exception as e:
+                        print("[*] Failed to start USB watcher dynamically:", e)
+                elif not usb_monitor.running:
+                    usb_monitor.start()
+                    print("[*] USB watcher started dynamically.")
+            else:
+                if usb_monitor and usb_monitor.running:
+                    usb_monitor.stop()
+                    print("[*] USB watcher stopped dynamically.")
+
+            # 3. Webmail / Email Monitor
+            if monitoring.get("webmail", True):
+                if not webmail_server:
+                    try:
+                        from comms.http_server import DataShieldHTTPServer
+                        bg_state["employee_id"]    = employee_id
+                        bg_state["employee_email"] = email
+                        bg_state["employee_name"]  = name
+                        bg_state["server_url"]     = server_url
+                        webmail_server = DataShieldHTTPServer(bg_state, on_event_callback=_bg_event_with_feed)
+                        webmail_server.start()
+                        print("[*] Webmail scan API activated dynamically.")
+                    except Exception as e:
+                        print("[*] Failed to start Webmail scan API dynamically:", e)
+                elif not webmail_server.running:
+                    webmail_server.start()
+                    print("[*] Webmail scan API started dynamically.")
+            else:
+                if webmail_server and webmail_server.running:
+                    webmail_server.stop()
+                    print("[*] Webmail scan API stopped dynamically.")
+
+        if client:
+            client.on_monitoring_update = _handle_monitoring_update
+
+        def _ping_server():
+            online = False
+            if server_url:
+                try:
+                    import httpx as _hx
+                    resp = _hx.get(server_url + "/api/health", timeout=3)
+                    online = resp.status_code < 500
+                except Exception:
+                    online = False
+            app.set_agent_status(online)
+            app.after(30000, _ping_server)
+
+        app.after(2000, _ping_server)
+
+        # Start override notification polling (60s interval)
+        if employee_id and server_url:
+            app.state["employee_id"] = employee_id
+            app.after(5000, app._start_override_poll)
+
+        print("[*] DataShield running. Opening employee portal...")
+        first_name = name.split()[0] if name else "there"
         alerts.send_desktop_notification(
             "DataShield Active",
-            f"Hello {name.split()[0]}! Your workstation is now protected.\n"
-            "Right-click the tray icon to open DataShield."
-        )
-
-        # Start hidden — employee opens via tray
-        app.withdraw()
+            "Hello " + first_name + "! Your workstation is now protected.")
+        app.deiconify()
         app.mainloop()
+
 
     except ImportError as e:
         print(f"Error launching GUI: {e}", file=sys.stderr)

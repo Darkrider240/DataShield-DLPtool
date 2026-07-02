@@ -84,7 +84,7 @@ export default function Dashboard() {
                   <div>
                     <p style={{ fontSize: '13px', color: 'var(--text-primary)', lineHeight: 1.4 }}>{a.title}</p>
                     <p style={{ fontSize: '11px', color: 'var(--text-muted)', marginTop: 2 }}>
-                      {a.severity} · {a.employee_email ?? ''}
+                      {a.severity} · {a.employee_id ?? ''}
                     </p>
                   </div>
                 </div>

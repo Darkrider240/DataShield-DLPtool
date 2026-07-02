@@ -22,6 +22,8 @@ class ServerReportingClient:
         self._policy_version = ""
         self.loop = None
         self.thread = None
+        self.on_monitoring_update = None  # callback(settings_dict)
+        self._last_monitoring = {}         # caches last seen settings to check for changes
 
     async def register(self, hostname: str, employee_email: str, platform: str, agent_version: str):
         url = f"{self.server_url}/api/agents/register"
@@ -60,7 +62,7 @@ class ServerReportingClient:
     async def send_heartbeat(self):
         while True:
             try:
-                await asyncio.sleep(60)
+                await asyncio.sleep(5)  # 5 seconds for live demo responsiveness
                 if not self.agent_id:
                     continue
                 url = f"{self.server_url}/api/agents/heartbeat"
@@ -73,6 +75,22 @@ class ServerReportingClient:
                     data = response.json()
                     if data.get("policy_update_available"):
                         await self.fetch_and_apply_policies()
+
+                    # Extract monitoring configuration
+                    mon_keys = ["monitor_clipboard", "monitor_usb", "monitor_webmail", "monitor_file_scan"]
+                    current_mon = {k: data.get(k, True) for k in mon_keys}
+                    
+                    if current_mon != self._last_monitoring:
+                        self._last_monitoring = current_mon
+                        if self.on_monitoring_update:
+                            # Normalize keys from 'monitor_xyz' to 'xyz' for the agent
+                            agent_format = {
+                                "clipboard": current_mon["monitor_clipboard"],
+                                "usb":       current_mon["monitor_usb"],
+                                "webmail":   current_mon["monitor_webmail"],
+                                "file_scan": current_mon["monitor_file_scan"]
+                            }
+                            self.on_monitoring_update(agent_format)
             except Exception as e:
                 print(f"[*] Heartbeat connection error: {e}", file=sys.stderr)
 
